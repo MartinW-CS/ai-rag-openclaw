@@ -26,14 +26,17 @@ An end-to-end AI-powered document search and question-answering system built wit
 ```
 ai-rag-openclaw/
 ├── app/
-│   ├── data/               # Place your PDF documents here
+│   ├── data/               # PDF documents (default: RAG_Project_Guide.pdf)
 │   ├── ingest.py           # PDF loading and chunking
 │   ├── retriever.py        # Vector search against ChromaDB
 │   ├── generator.py        # Claude API call with retrieved context
 │   ├── rag_pipeline.py     # Connects retrieval and generation
 │   ├── streamlit_app.py    # Streamlit frontend
 │   └── openclaw_skill.py   # Wraps RAG as a callable OpenClaw skill
+├── assets/
+│   └── demo.png            # Demo screenshot
 ├── .env                    # API keys (not committed)
+├── .gitignore
 ├── requirements.txt
 └── README.md
 ```
@@ -63,10 +66,6 @@ Create a `.env` file in the project root:
 ANTHROPIC_API_KEY=your-api-key-here
 ```
 
-### 4. Add documents
-
-Drop PDF files into the `app/data/` folder.
-
 ---
 
 ## Usage
@@ -77,7 +76,7 @@ Drop PDF files into the `app/data/` folder.
 streamlit run app/streamlit_app.py
 ```
 
-Open [http://localhost:8501](http://localhost:8501), upload or select a PDF, and ask questions.
+Once the Streamlit web interface is launched, you can directly upload local PDF files and engage in Q&A regarding the document's content.
 
 ### OpenClaw skill
 
@@ -171,14 +170,17 @@ MIT
 ```
 ai-rag-openclaw/
 ├── app/
-│   ├── data/               # 将你的 PDF 文档放在此处
+│   ├── data/               # PDF 文档（默认：RAG_Project_Guide.pdf）
 │   ├── ingest.py           # PDF 加载与文本分块
 │   ├── retriever.py        # 基于 ChromaDB 的向量检索
 │   ├── generator.py        # 调用 Claude API 生成答案
 │   ├── rag_pipeline.py     # 连接检索与生成的主管道
 │   ├── streamlit_app.py    # Streamlit 前端界面
 │   └── openclaw_skill.py   # 将 RAG 封装为可调用的 OpenClaw 技能
-├── .env                    # API 密钥（不提交至版本控制）
+├── assets/
+│   └── demo.png            # 演示截图
+├── .env                    # API 密钥（不提交至 Git）
+├── .gitignore
 ├── requirements.txt
 └── README.md
 ```
@@ -208,10 +210,6 @@ pip install -r requirements.txt
 ANTHROPIC_API_KEY=your-api-key-here
 ```
 
-### 4. 添加文档
-
-将 PDF 文件放入 `app/data/` 文件夹。
-
 ---
 
 ## 使用方式
@@ -222,7 +220,7 @@ ANTHROPIC_API_KEY=your-api-key-here
 streamlit run app/streamlit_app.py
 ```
 
-打开 [http://localhost:8501](http://localhost:8501)，上传或选择 PDF，然后开始提问。
+启动 Streamlit Web 界面后，可直接上传本地 PDF，并针对文档内容进行问答。
 
 ### OpenClaw 技能调用
 
