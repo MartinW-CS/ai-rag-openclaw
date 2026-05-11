@@ -1,6 +1,6 @@
 # Agentic RAG System with Claude and ChromaDB
 
-[中文版本](#ai-知识助手--基于-rag-使用-claude-与-openclaw)
+[中文版本](#基于-claude-与-chromadb-的智能体式-rag-系统)
 
 An end-to-end AI-powered document search and question-answering system built with Retrieval-Augmented Generation (RAG). Upload PDFs, ask questions, and get grounded answers with citations — powered by Anthropic's Claude and exposed as an OpenClaw agent skill.
 
