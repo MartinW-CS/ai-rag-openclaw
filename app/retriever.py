@@ -9,7 +9,7 @@ COLLECTION_NAME = "rag_mvp"
 def build_vector_store(chunks):
     """Embed chunks and load them into an in-memory Chroma collection."""
     embedder = SentenceTransformer(EMBED_MODEL)
-    client = chromadb.Client()
+    client = chromadb.EphemeralClient()
     if any(c.name == COLLECTION_NAME for c in client.list_collections()):
         client.delete_collection(COLLECTION_NAME)
     collection = client.create_collection(COLLECTION_NAME)
