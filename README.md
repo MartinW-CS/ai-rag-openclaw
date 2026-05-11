@@ -6,6 +6,11 @@ An end-to-end AI-powered document search and question-answering system built wit
 
 ---
 
+## Demo
+![Demo screenshot](assets/demo.png)
+
+---
+
 ## How it works
 
 1. **Ingest** — PDFs are loaded, split into chunks, and embedded using `sentence-transformers`
@@ -143,6 +148,11 @@ MIT
 # 基于 Claude 与 ChromaDB 的智能体式 RAG 系统
 
 一个端到端的 AI 文档检索与问答系统，基于检索增强生成（RAG）技术构建。支持上传 PDF、进行自然语言问答，并返回带引用来源的答案；系统由 Anthropic Claude 驱动，并集成 Agent Tool Calling 能力。
+
+---
+
+## 演示
+![Demo screenshot](assets/demo.png)
 
 ---
 
