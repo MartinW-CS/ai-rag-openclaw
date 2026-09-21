@@ -285,3 +285,45 @@ Sources:
 ## 许可证
 
 MIT
+## FastAPI API / HTTP 接口
+
+From the repository root / 在仓库根目录运行：
+
+```bash
+python -m pip install -r requirements.txt
+python -m uvicorn app.api:app --reload
+```
+
+Configure `ANTHROPIC_API_KEY` in the root `.env` and place PDFs in `app/data/`.
+The first `/ask` request builds an in-memory index and may download the embedding
+model. Later requests reuse that index; restart the API after adding, removing,
+or replacing PDFs (including changes made through Streamlit). Each server process
+has its own index. Streamlit continues to run with its existing command.
+
+在根目录 `.env` 配置 `ANTHROPIC_API_KEY`，将 PDF 放入 `app/data/`。
+首次提问建立内存索引，可能需要下载嵌入模型；后续请求复用索引。
+PDF 发生变化后（包括通过 Streamlit 上传或删除）需重启 API。
+
+```bash
+curl http://127.0.0.1:8000/health
+# {"status":"ok"}
+
+curl -X POST http://127.0.0.1:8000/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"What is RAG?"}'
+# {"answer":"...", "sources":[{"source":"example.pdf", "page":1}]}
+```
+
+`/health` reports process liveness only, without checking Claude or the index.
+`/ask` returns the existing Claude answer plus deduplicated retrieved source/page
+pairs (retrieval provenance, not a guarantee every page was cited in the answer).
+Missing/blank questions return 422; missing credentials or PDFs with extractable
+text return 503; unexpected processing failures return 500 without exposing
+internal exception details. Interactive API docs: http://127.0.0.1:8000/docs.
+
+接口测试无需密钥、模型下载或 Claude 调用 / API contract tests use mocked RAG dependencies:
+
+```bash
+python -m pip install httpx
+python -m unittest discover -s tests -v
+```
