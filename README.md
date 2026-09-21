@@ -295,14 +295,14 @@ python -m uvicorn app.api:app --reload
 ```
 
 Configure `ANTHROPIC_API_KEY` in the root `.env` and place PDFs in `app/data/`.
-The first `/ask` request builds an in-memory index and may download the embedding
-model. Later requests reuse that index while the document set is unchanged. Adding, removing,
-or replacing PDFs triggers a rebuild on the next question, including changes made through Streamlit. Each server process
-has its own index. Streamlit continues to run with its existing command.
+A background worker builds the in-memory index on startup and after document changes.
+The initial build may download the embedding model. Questions use the last ready
+version; before any version is ready they return 503 with Retry-After.
+Run exactly one API worker per document directory. Streamlit remains available.
 
 在根目录 `.env` 配置 `ANTHROPIC_API_KEY`，将 PDF 放入 `app/data/`。
-首次提问建立内存索引，可能需要下载嵌入模型；后续请求复用索引。
-PDF 发生变化后（包括通过 Streamlit 上传或删除），下一次提问自动重建索引。
+服务启动和文档变化后自动在后台建立索引，首次运行可能下载嵌入模型。
+索引未就绪时问答返回 503；更新期间可以查询已有版本。
 
 ```bash
 curl http://127.0.0.1:8000/health
@@ -317,8 +317,8 @@ curl -X POST http://127.0.0.1:8000/ask \
 `/health` reports process liveness only, without checking Claude or the index.
 `/ask` returns the existing Claude answer plus deduplicated retrieved source/page
 pairs (retrieval provenance, not a guarantee every page was cited in the answer).
-Missing/blank questions return 422; missing credentials or PDFs with extractable
-text return 503; unexpected processing failures return 500 without exposing
+Missing/blank questions return 422; missing credentials or a ready index
+return 503; unexpected processing failures return 500 without exposing
 internal exception details. Interactive API docs: http://127.0.0.1:8000/docs.
 
 接口测试无需密钥、模型下载或 Claude 调用 / API contract tests use mocked RAG dependencies:
@@ -345,9 +345,9 @@ Keep `ANTHROPIC_API_KEY` in the repository root `.env`, never in browser variabl
 The frontend proxies requests, so no CORS configuration is needed.
 
 新版界面支持问题输入、生成状态、Markdown 答案、来源页码和错误重试。
-连接状态仅表示后端存活，不表示密钥或索引已就绪。首个问题可能需要下载模型。
-新版侧栏支持 PDF 上传、完整文档列表和移除，文档变更后下次提问自动重建索引。
-上传后显示“待索引”，成功建立当前索引后显示“已索引”；上传不会调用 Claude。
+连接状态仅表示后端存活，不表示密钥或索引已就绪。后台初始化可能需要下载模型。
+新版侧栏支持 PDF 上传、完整文档列表和移除，文档变更后在后台重建索引。
+上传后显示“排队中 → 索引中 → 已就绪 / 处理失败”，失败时可重试；上传不会调用 Claude。
 Streamlit 入口继续保留。原文预览和检索片段检查器尚未接入。
 
 Frontend validation / 前端检查：
@@ -361,7 +361,7 @@ npm run typecheck
 
 ### Document management / 文档管理
 
-- `GET /documents`: list PDF filenames, byte sizes, and `pending` / `indexed` state.
+- `GET /documents`: list PDF filenames, byte sizes, and `queued` / `indexing` / `indexed` / `failed` state.
 - `POST /documents`: multipart form with a `file` field; returns 201.
 - `DELETE /documents?filename=guide.pdf`: remove from the active library.
 
@@ -371,8 +371,9 @@ without overwriting the original. Uppercase `.PDF` extensions are normalized.
 Removed files are retained under `app/data/.trash/<id>/` and excluded from retrieval.
 To restore a removed file, move it back to `app/data/` without replacing an existing file.
 Document management does not require an Anthropic key; questions still do.
-Index state is per API process. Run one worker for a consistent status display.
-An in-flight answer may still cite the document snapshot retrieved before a removal.
+Run one API worker. A process ownership lock rejects a second worker using the same directory.
+If a retrieved source is removed or replaced during generation, the API discards the answer
+and returns 409, asking the user to submit again.
 
 ```bash
 curl http://127.0.0.1:8000/documents
@@ -383,3 +384,56 @@ curl -X DELETE 'http://127.0.0.1:8000/documents?filename=guide.pdf'
 The API and frontend are local development services without authentication.
 Keep them bound to localhost; shared hosting requires access control.
 Newly uploaded PDFs and the local recovery directory are excluded from Git.
+
+
+## Bounded concurrency and background indexing
+
+Requires **Python 3.11+ on Linux/macOS** (`asyncio.timeout` and POSIX file locks).
+This is a single-process concurrency improvement, not a distributed deployment.
+
+```bash
+# Defaults shown; keep --workers 1. Never use --reload for load tests.
+RAG_MAX_ASK=8 RAG_MAX_UPLOAD=2 RAG_RETRIEVAL_WORKERS=2 \
+  python -m uvicorn app.api:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+- API admission allows at most 8 question requests and 2 PDF uploads at a time.
+  Excess requests fail immediately with **429 + Retry-After**; no unbounded waiting queue.
+- At most 2 retrieval jobs run in a dedicated executor. A timed-out caller does not
+  release its CPU slot until the actual retrieval ends. Query embedding is serialized
+  on its model instance. Background embedding uses a separate reusable model instance.
+- Questions have a 60-second total application deadline; the reusable async Claude
+  client has a 55-second request timeout and **zero automatic retries** to avoid
+  retry amplification. Model errors map to 429 / 502 / 504. Next.js waits at most
+  75 seconds and forwards Retry-After. It has its own fixed 8-question / 2-upload
+  per-process admission limits; raising API limits alone does not raise these limits.
+- Request bodies are capped **before parsing** in both Next.js and FastAPI:
+  32 KiB for questions, 11 MiB for multipart uploads (file limit remains 10 MiB).
+  Receiving a body has a 30-second deadline. Questions are limited to 8,000 characters.
+- There is **one background build and one coalesced pending document state**.
+  Changes during a build cause the obsolete candidate to be discarded, then the latest
+  state is built. No separate rebuild job is queued for every upload.
+- Each candidate uses a unique Chroma collection and a temporary PDF snapshot.
+  A completed version is published only if the document signature still matches.
+  Existing readers keep the prior version alive; retired collections are cleaned up
+  after the final reader finishes. Failed builds retain the last ready version.
+- Removed or replaced sources are filtered before generation and checked again before
+  returning an answer. A model call already sent before deletion cannot be recalled;
+  its answer is discarded if the relevant document changed.
+- Failed builds do not retry in a tight loop. Use **POST /index/retry** or the UI retry
+  button. External PDF changes are checked every 2 seconds. Document states are polled
+  by the frontend while processing is in progress.
+- Shutdown waits for active retrieval and background work before releasing ownership.
+  CPU/native-library calls cannot be force-cancelled by an HTTP timeout. An external
+  supervisor is still needed for a wedged process. All state is rebuilt after restart.
+
+Tests use real PDF parsing, deterministic fake indexes/generation, and synchronization
+barriers to verify overload rejection, health responsiveness, timeout cleanup, deletion
+races, update coalescing, failure recovery, and safe index retirement. Optional Chroma
+integration tests use the real vector store with small fake embeddings (no model download).
+These are correctness checks, **not measured production capacity or real Claude benchmarks**.
+
+Before multi-instance deployment, move document metadata and files to shared durable
+storage, replace the in-process index worker with a durable task queue, and use a shared
+vector database with coordinated versions. Authentication and per-user quotas are also
+required for a shared service; this version remains localhost-only.

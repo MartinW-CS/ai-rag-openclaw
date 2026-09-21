@@ -214,3 +214,4 @@ app/data/*.tmp
 # Keep the Next.js server-side source directory
 !frontend/lib/
 !frontend/lib/**
+app/data/.api.lock

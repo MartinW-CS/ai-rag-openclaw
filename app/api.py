@@ -1,29 +1,30 @@
-"""Minimal HTTP interface over the existing PDF retrieval and generation code."""
+"""Local, single-worker API with background indexing and bounded admission."""
+import asyncio
+from contextlib import asynccontextmanager
+import fcntl
+import io
 import logging
 import os
-import io
-import tempfile
-import uuid
 from pathlib import Path
-from threading import RLock
+import tempfile
 from typing import Annotated
+import uuid
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile
 from pydantic import BaseModel, StringConstraints
 
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
-app = FastAPI(title="RAG Knowledge Assistant")
+from .concurrency import AdmissionMiddleware, BoundedExecutor, Busy
+from .index_service import IndexService, IndexUnavailable
+
+load_dotenv(Path(__file__).resolve().parents[1] / '.env')
 logger = logging.getLogger(__name__)
-DATA_DIR = Path(__file__).parent / "data"
-_index = None
-_index_lock = RLock()
-_index_signature = None
+DATA_DIR = Path(__file__).parent / 'data'
 MAX_PDF_BYTES = 10 * 1024 * 1024
 
 
 class AskRequest(BaseModel):
-    question: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    question: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=8000)]
 
 
 class Source(BaseModel):
@@ -36,138 +37,169 @@ class AskResponse(BaseModel):
     sources: list[Source]
 
 
-def get_index():
-    """Build once per process; retry after a failed or empty initialization."""
-    global _index, _index_signature
-    with _index_lock:
-        signature = document_signature()
-        if _index is None or signature != _index_signature:
-            _index = None
-            _index_signature = None
-            from .ingest import load_and_chunk_pdfs
-
-            chunks = load_and_chunk_pdfs(DATA_DIR)
-            if not chunks:
-                raise HTTPException(503, "No PDF text found. Add PDFs to app/data/.")
-            from .retriever import build_vector_store
-
-            _index = build_vector_store(chunks)
-            _index_signature = signature
-        return _index
-
-
-def answer_question(question: str) -> AskResponse:
-    # Collection replacement must not race a query against the previous index.
-    with _index_lock:
-        collection, embedder = get_index()
-        from .retriever import TOP_K, retrieve
-
-        retrieved = retrieve(collection, embedder, question, k=min(TOP_K, collection.count()))
-    from .generator import ask_claude
-
-    answer = ask_claude(question, retrieved)
-    sources = dict.fromkeys((meta["source"], meta["page"]) for _, meta in retrieved)
-    return AskResponse(
-        answer=answer,
-        sources=[Source(source=source, page=page) for source, page in sources],
-    )
-
-
-@app.get("/health")
-def health() -> dict[str, str]:
-    """Liveness only: does not load embeddings or contact Claude."""
-    return {"status": "ok"}
-
-
-@app.post("/ask", response_model=AskResponse)
-def ask(request: AskRequest) -> AskResponse:
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        raise HTTPException(503, "ANTHROPIC_API_KEY is not configured.")
-    try:
-        return answer_question(request.question)
-    except HTTPException:
-        raise
-    except Exception:
-        logger.exception("RAG request failed")
-        raise HTTPException(500, "Unable to answer the question. Check server logs.") from None
-
-
 class Document(BaseModel):
     name: str
     size: int
     status: str
 
 
-def pdf_paths():
-    return sorted(path for path in DATA_DIR.glob("*.pdf") if path.is_file() and not path.is_symlink())
+def positive_env(name, default):
+    value = int(os.getenv(name, str(default)))
+    if value < 1:
+        raise ValueError(f'{name} must be positive')
+    return value
 
 
-def document_signature():
-    return tuple((path.name, path.stat().st_size, path.stat().st_mtime_ns) for path in pdf_paths())
-
-
-def safe_document_path(filename: str):
-    if (not filename or filename.startswith(".") or "/" in filename or "\\" in filename
-            or any(ord(char) < 32 for char in filename) or len(filename.encode("utf-8")) > 200
-            or not filename.endswith(".pdf")):
-        raise HTTPException(400, "请使用有效的 PDF 文件名。")
-    path = DATA_DIR / filename
+def safe_document_path(directory, filename):
+    if (not filename or filename.startswith('.') or '/' in filename or '\\' in filename
+            or any(ord(char) < 32 for char in filename) or len(filename.encode('utf-8')) > 200
+            or not filename.endswith('.pdf')):
+        raise HTTPException(400, '请使用有效的 PDF 文件名。')
+    path = directory / filename
     if path.is_symlink():
-        raise HTTPException(400, "不支持符号链接。")
+        raise HTTPException(400, '不支持符号链接。')
     return path
 
 
-@app.get("/documents", response_model=list[Document])
-def list_documents():
-    with _index_lock:
-        indexed = _index is not None and document_signature() == _index_signature
-        return [Document(name=path.name, size=path.stat().st_size,
-                         status="indexed" if indexed else "pending") for path in pdf_paths()]
+def create_app(directory=DATA_DIR, *, builder=None, generator=None, ask_limit=None,
+               retrieval_workers=None, ask_timeout=60.0, poll_seconds=2):
+    from .api_index import ApiIndexBuilder
+    directory = Path(directory)
+    service = IndexService(directory, builder or ApiIndexBuilder(), poll_seconds=poll_seconds)
+    retrieval = BoundedExecutor(retrieval_workers or positive_env('RAG_RETRIEVAL_WORKERS', 2))
 
+    @asynccontextmanager
+    async def lifespan(application):
+        directory.mkdir(parents=True, exist_ok=True)
+        ownership = (directory / '.api.lock').open('a')
+        try:
+            try:
+                fcntl.flock(ownership, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise RuntimeError('This API supports one worker per document directory. Stop the other worker first.') from None
+            if generator is None:
+                from .async_generator import AsyncGenerator
+                application.state.generator = AsyncGenerator()
+            else:
+                application.state.generator = generator
+            service.start()
+            try:
+                yield
+            finally:
+                # Shutdown happens off the event loop and drains admitted CPU work.
+                await asyncio.to_thread(retrieval.close)
+                await asyncio.to_thread(service.stop)
+                close = getattr(application.state.generator, 'close', None)
+                if close is not None:
+                    await close()
+        finally:
+            ownership.close()
 
-@app.post("/documents", response_model=Document, status_code=201)
-def upload_document(file: UploadFile):
-    filename = file.filename or ""
-    if filename.lower().endswith(".pdf"):
-        filename = filename[:-4] + ".pdf"
-    path = safe_document_path(filename)
-    try:
-        contents = file.file.read(MAX_PDF_BYTES + 1)
-    finally:
-        file.file.close()
-    if len(contents) > MAX_PDF_BYTES:
-        raise HTTPException(413, "PDF 不能超过 10 MB。")
-    from pypdf import PdfReader
-    try:
-        if not contents.startswith(b"%PDF-"):
-            raise ValueError("Not a PDF")
-        reader = PdfReader(io.BytesIO(contents))
-        if reader.is_encrypted:
-            raise ValueError("Encrypted PDF")
-        if not any((page.extract_text() or "").strip() for page in reader.pages):
-            raise ValueError("No extractable text")
-    except Exception:
-        raise HTTPException(422, "请上传包含可提取文字的有效 PDF；暂不支持加密或纯扫描文档。") from None
-    with _index_lock:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        # Publish a complete file atomically, without overwriting duplicate names.
-        with tempfile.NamedTemporaryFile(dir=DATA_DIR, suffix=".tmp") as temp:
+    application = FastAPI(title='RAG Knowledge Assistant', lifespan=lifespan)
+    application.state.index = service
+    application.state.retrieval = retrieval
+    application.add_middleware(AdmissionMiddleware,
+                              ask_limit=ask_limit or positive_env('RAG_MAX_ASK', 8),
+                              upload_limit=positive_env('RAG_MAX_UPLOAD', 2))
+
+    @application.get('/health')
+    async def health():
+        return {'status': 'ok'}
+
+    def retrieve_question(question):
+        with service.lease() as (version, allowed):
+            chunks = version.index.retrieve(question, allowed)
+            return service.filter_current(chunks, version.signature), version.signature
+
+    @application.post('/ask', response_model=AskResponse)
+    async def ask(request: AskRequest):
+        if not os.getenv('ANTHROPIC_API_KEY'):
+            raise HTTPException(503, 'ANTHROPIC_API_KEY is not configured.')
+        try:
+            async with asyncio.timeout(ask_timeout):
+                chunks, signature = await retrieval.run(retrieve_question, request.question)
+                if not chunks:
+                    raise IndexUnavailable('没有可用的已索引内容，请等待索引更新。')
+                answer = await application.state.generator(request.question, chunks)
+                # Do not return an answer based on a removed/replaced document.
+                if service.filter_current(chunks, signature) != chunks:
+                    raise HTTPException(409, '回答期间文档发生变化，请重新提问。')
+                sources = dict.fromkeys((meta['source'], meta['page']) for _, meta in chunks)
+                return AskResponse(answer=answer, sources=[Source(source=name, page=page) for name, page in sources])
+        except HTTPException:
+            raise
+        except Busy as error:
+            raise HTTPException(429, str(error), headers={'Retry-After': '2'}) from None
+        except IndexUnavailable as error:
+            raise HTTPException(503, str(error), headers={'Retry-After': '2'}) from None
+        except TimeoutError:
+            raise HTTPException(504, '回答超时，请稍后重试。') from None
+        except Exception as error:
+            from anthropic import APITimeoutError, RateLimitError, APIError
+            if isinstance(error, APITimeoutError):
+                raise HTTPException(504, '模型服务超时，请稍后重试。') from None
+            if isinstance(error, RateLimitError):
+                raise HTTPException(429, '模型服务繁忙，请稍后重试。', headers={'Retry-After': '5'}) from None
+            if isinstance(error, APIError):
+                logger.exception('Model service failed')
+                raise HTTPException(502, '模型服务暂时不可用，请稍后重试。') from None
+            logger.exception('RAG request failed')
+            raise HTTPException(500, 'Unable to answer the question. Check server logs.') from None
+
+    @application.get('/documents', response_model=list[Document])
+    def list_documents():
+        return service.documents()
+
+    @application.post('/index/retry', status_code=202)
+    def retry_index():
+        service.retry()
+        return {'status': 'queued'}
+
+    @application.post('/documents', response_model=Document, status_code=201)
+    def upload_document(file: UploadFile):
+        try:
+            filename = file.filename or ''
+            if filename.lower().endswith('.pdf'):
+                filename = filename[:-4] + '.pdf'
+            path = safe_document_path(directory, filename)
+            contents = file.file.read(MAX_PDF_BYTES + 1)
+        finally:
+            file.file.close()
+        if len(contents) > MAX_PDF_BYTES:
+            raise HTTPException(413, 'PDF 不能超过 10 MB。')
+        from pypdf import PdfReader
+        try:
+            if not contents.startswith(b'%PDF-'):
+                raise ValueError('Not a PDF')
+            reader = PdfReader(io.BytesIO(contents))
+            if reader.is_encrypted or not any((page.extract_text() or '').strip() for page in reader.pages):
+                raise ValueError('Encrypted PDF or no extractable text')
+        except Exception:
+            raise HTTPException(422, '请上传包含可提取文字的有效 PDF；暂不支持加密或纯扫描文档。') from None
+        with tempfile.NamedTemporaryFile(dir=directory, suffix='.tmp') as temp:
             temp.write(contents)
             temp.flush()
-            try:
-                os.link(temp.name, path)
-            except FileExistsError:
-                raise HTTPException(409, "同名文档已存在，请重命名后上传。") from None
-    return Document(name=filename, size=len(contents), status="pending")
+            with service.condition:
+                try:
+                    os.link(temp.name, path)
+                except FileExistsError:
+                    raise HTTPException(409, '同名文档已存在，请重命名后上传。') from None
+                service.changed()
+        return Document(name=filename, size=len(contents), status='queued')
+
+    @application.delete('/documents')
+    def delete_document(filename: str):
+        path = safe_document_path(directory, filename)
+        with service.condition:
+            if not path.is_file():
+                raise HTTPException(404, '文档不存在。')
+            trash = directory / '.trash' / uuid.uuid4().hex
+            trash.mkdir(parents=True)
+            path.rename(trash / filename)
+            service.changed()
+        return {'status': 'removed', 'name': filename}
+
+    return application
 
 
-@app.delete("/documents")
-def delete_document(filename: str):
-    path = safe_document_path(filename)
-    with _index_lock:
-        if not path.is_file():
-            raise HTTPException(404, "文档不存在。")
-        trash = DATA_DIR / ".trash" / uuid.uuid4().hex
-        trash.mkdir(parents=True)
-        path.rename(trash / filename)
-    return {"status": "removed", "name": filename}
+app = create_app()
