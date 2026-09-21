@@ -205,3 +205,12 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Local document library and recoverable removals
+app/data/*.pdf
+app/data/.trash/
+app/data/*.tmp
+
+# Keep the Next.js server-side source directory
+!frontend/lib/
+!frontend/lib/**

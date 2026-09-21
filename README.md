@@ -296,13 +296,13 @@ python -m uvicorn app.api:app --reload
 
 Configure `ANTHROPIC_API_KEY` in the root `.env` and place PDFs in `app/data/`.
 The first `/ask` request builds an in-memory index and may download the embedding
-model. Later requests reuse that index; restart the API after adding, removing,
-or replacing PDFs (including changes made through Streamlit). Each server process
+model. Later requests reuse that index while the document set is unchanged. Adding, removing,
+or replacing PDFs triggers a rebuild on the next question, including changes made through Streamlit. Each server process
 has its own index. Streamlit continues to run with its existing command.
 
 在根目录 `.env` 配置 `ANTHROPIC_API_KEY`，将 PDF 放入 `app/data/`。
 首次提问建立内存索引，可能需要下载嵌入模型；后续请求复用索引。
-PDF 发生变化后（包括通过 Streamlit 上传或删除）需重启 API。
+PDF 发生变化后（包括通过 Streamlit 上传或删除），下一次提问自动重建索引。
 
 ```bash
 curl http://127.0.0.1:8000/health
@@ -346,9 +346,9 @@ The frontend proxies requests, so no CORS configuration is needed.
 
 新版界面支持问题输入、生成状态、Markdown 答案、来源页码和错误重试。
 连接状态仅表示后端存活，不表示密钥或索引已就绪。首个问题可能需要下载模型。
-当前 API 只提供健康检查和问答；PDF 仍通过 Streamlit 管理，变更后重启 API。
-侧栏仅展示本次检索返回的文档，不代表整个知识库清单。
-上传管理、原文预览和检索片段检查器留待对应 API 扩展后接入。
+新版侧栏支持 PDF 上传、完整文档列表和移除，文档变更后下次提问自动重建索引。
+上传后显示“待索引”，成功建立当前索引后显示“已索引”；上传不会调用 Claude。
+Streamlit 入口继续保留。原文预览和检索片段检查器尚未接入。
 
 Frontend validation / 前端检查：
 
@@ -357,3 +357,29 @@ cd frontend
 npm run build
 npm run typecheck
 ```
+
+
+### Document management / 文档管理
+
+- `GET /documents`: list PDF filenames, byte sizes, and `pending` / `indexed` state.
+- `POST /documents`: multipart form with a `file` field; returns 201.
+- `DELETE /documents?filename=guide.pdf`: remove from the active library.
+
+Uploads are limited to 10 MiB and must be valid PDFs with extractable text.
+Encrypted PDFs and image-only scans return 422; duplicate filenames return 409
+without overwriting the original. Uppercase `.PDF` extensions are normalized.
+Removed files are retained under `app/data/.trash/<id>/` and excluded from retrieval.
+To restore a removed file, move it back to `app/data/` without replacing an existing file.
+Document management does not require an Anthropic key; questions still do.
+Index state is per API process. Run one worker for a consistent status display.
+An in-flight answer may still cite the document snapshot retrieved before a removal.
+
+```bash
+curl http://127.0.0.1:8000/documents
+curl -X POST http://127.0.0.1:8000/documents -F 'file=@/path/to/guide.pdf'
+curl -X DELETE 'http://127.0.0.1:8000/documents?filename=guide.pdf'
+```
+
+The API and frontend are local development services without authentication.
+Keep them bound to localhost; shared hosting requires access control.
+Newly uploaded PDFs and the local recovery directory are excluded from Git.
