@@ -327,3 +327,33 @@ internal exception details. Interactive API docs: http://127.0.0.1:8000/docs.
 python -m pip install httpx
 python -m unittest discover -s tests -v
 ```
+
+## Next.js frontend / 新版问答界面
+
+The `frontend/` app follows `DESIGN.md` and connects to the FastAPI endpoints
+through server-side routes. Start FastAPI as above, then in a second terminal:
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+Open http://localhost:3000. Optionally copy `frontend/.env.example` to
+`frontend/.env.local` and change `RAG_API_URL` if the Python server runs elsewhere.
+Keep `ANTHROPIC_API_KEY` in the repository root `.env`, never in browser variables.
+The frontend proxies requests, so no CORS configuration is needed.
+
+新版界面支持问题输入、生成状态、Markdown 答案、来源页码和错误重试。
+连接状态仅表示后端存活，不表示密钥或索引已就绪。首个问题可能需要下载模型。
+当前 API 只提供健康检查和问答；PDF 仍通过 Streamlit 管理，变更后重启 API。
+侧栏仅展示本次检索返回的文档，不代表整个知识库清单。
+上传管理、原文预览和检索片段检查器留待对应 API 扩展后接入。
+
+Frontend validation / 前端检查：
+
+```bash
+cd frontend
+npm run build
+npm run typecheck
+```
