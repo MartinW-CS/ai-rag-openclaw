@@ -50,9 +50,9 @@ class ConcurrencyTests(ApiFixture, unittest.TestCase):
     def test_timed_out_cpu_work_keeps_its_slot(self):
         entered, release = Event(), Event()
         class SlowIndex(FakeIndex):
-            def retrieve(self, question, allowed):
+            def retrieve(self, question, allowed, top_k=4):
                 entered.set(); release.wait(5)
-                return super().retrieve(question, allowed)
+                return super().retrieve(question, allowed, top_k)
         self.setup_api(builder=SlowIndex, retrieval_workers=1, ask_timeout=0.1)
         self.upload(); self.ready()
         try:
@@ -135,9 +135,9 @@ class ConcurrencyTests(ApiFixture, unittest.TestCase):
     def test_old_collection_lives_until_last_reader_finishes(self):
         entered, release = Event(), Event()
         class SlowIndex(FakeIndex):
-            def retrieve(self, question, allowed):
+            def retrieve(self, question, allowed, top_k=4):
                 entered.set(); release.wait(5)
-                return super().retrieve(question, allowed)
+                return super().retrieve(question, allowed, top_k)
         self.setup_api(builder=SlowIndex)
         self.upload('a.pdf'); self.ready()
         old = self.service.current

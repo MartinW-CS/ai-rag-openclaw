@@ -461,7 +461,7 @@ rendered literally, not interpreted as HTML/Markdown. The panel describes the
 context supplied to the model, not a claim that every chunk supports every sentence.
 Older API responses without `retrieval` show an explicit unavailable message.
 
-Top-K remains 4. Retrieval controls and chat history remain later Phase 4 steps.
+Top-K defaults to 4 and supports 2 / 4 / 6 / 8. The UI includes session history.
 Real Claude generation still needs an end-to-end validation using a configured
 `ANTHROPIC_API_KEY` before final demo packaging; mocked generation in tests is not
 that validation.
@@ -508,3 +508,30 @@ checks. Browser smoke checks use the real three-page project PDF and real retrie
 with a clearly labeled generator test double: sidebar → page 1, keyboard source card
 → page 3, Inspector → page 2, manual jump, Escape/focus return, and a 390px mobile
 preview. These checks do **not** count as real Claude E2E.
+
+## Top-K + Session History
+
+`POST /ask` accepts `{"question":"Your question", "top_k":4}`. `top_k` must be
+an integer from `2 / 4 / 6 / 8`; omission preserves the default 4. Invalid values
+return 422. Ranking and embedding logic are unchanged. `retrieval.top_k` records
+the requested limit; fewer chunks may be returned when less content is available.
+The Inspector shows both the original Top-K and actual returned chunk count.
+
+The current tab stores the latest 10 successful question/answer snapshots in
+`sessionStorage`, including sources, complete retrieval details and original Top-K.
+Reloading the tab preserves the list; there is no server persistence, login, or
+multi-turn model context. Clicking history restores the snapshot without an API
+call. Failed questions are not saved. Clear history removes the saved list.
+If browser storage is blocked or full, a message explains that history is retained
+only in memory until refresh. Historical PDF links open the current document, which
+may have changed or been removed. Browsers may restore tab-session storage through
+their own session recovery features.
+
+History unit checks (Node 22.18+ with native TypeScript support):
+
+```bash
+node --test frontend/tests/session-history.test.mjs
+```
+
+Real Claude E2E remains a separate required gate; these features and automated
+tests do not establish that paid model generation has been validated.

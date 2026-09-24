@@ -23,14 +23,13 @@ class ApiIndex:
         self.client, self.collection = client, collection
         self.embedder, self.query_lock = embedder, query_lock
 
-    def retrieve(self, question, allowed):
-        from .retriever import TOP_K
+    def retrieve(self, question, allowed, top_k=4):
         # This runs in a bounded, dedicated retrieval executor, never the event loop.
         with self.query_lock:
             embedding = self.embedder.encode([question]).tolist()
         result = self.collection.query(
             query_embeddings=embedding,
-            n_results=min(TOP_K, self.collection.count()),
+            n_results=min(top_k, self.collection.count()),
             where={'source': {'$in': allowed}},
             include=['documents', 'metadatas', 'distances', 'embeddings'],
         )

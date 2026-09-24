@@ -10,6 +10,7 @@ export type RetrievedChunk = {
 };
 
 export type RetrievalDetails = {
+  top_k?: number;
   distance_metric: 'squared_l2';
   similarity_metric: 'cosine';
   chunks: RetrievedChunk[];
@@ -25,6 +26,7 @@ export function RetrievalInspector({ retrieval, onOpen }: { retrieval?: Retrieva
         <h3>检索片段 <span>{retrieval.chunks.length}</span></h3>
         <span className="section-label">RETRIEVAL INSPECTOR</span>
       </div>
+      <p>Top-K：{retrieval.top_k ?? '未记录'} · 实际返回 {retrieval.chunks.length} 个片段（可用内容不足时可能少于 Top-K）。</p>
       <p>以下片段按检索顺序提供给模型，用于生成本次回答。展开可查看完整原文。</p>
       <p className="score-help">按平方 L2 距离升序排列（越小越接近）。余弦相似度范围 −1 到 1，越大越相似；它不是答案正确率。</p>
       {!retrieval.chunks.length && <p>本次回答没有返回检索片段。</p>}

@@ -28,8 +28,12 @@ DATA_DIR = Path(__file__).parent / 'data'
 MAX_PDF_BYTES = 10 * 1024 * 1024
 
 
+TopK = Annotated[int, Field(strict=True, ge=2, le=8, multiple_of=2)]
+
+
 class AskRequest(BaseModel):
     question: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=8000)]
+    top_k: TopK = 4
 
 
 class Source(BaseModel):
@@ -49,6 +53,7 @@ class RetrievedChunk(BaseModel):
 
 
 class RetrievalDetails(BaseModel):
+    top_k: TopK = 4
     distance_metric: Literal['squared_l2'] = 'squared_l2'
     similarity_metric: Literal['cosine'] = 'cosine'
     chunks: list[RetrievedChunk]
@@ -129,9 +134,9 @@ def create_app(directory=DATA_DIR, *, builder=None, generator=None, ask_limit=No
     async def health():
         return {'status': 'ok'}
 
-    def retrieve_question(question):
+    def retrieve_question(question, top_k):
         with service.lease() as (version, allowed):
-            chunks = version.index.retrieve(question, allowed)
+            chunks = version.index.retrieve(question, allowed, top_k)
             return service.filter_current(chunks, version.signature), version.signature
 
     @application.post('/ask', response_model=AskResponse)
@@ -140,7 +145,7 @@ def create_app(directory=DATA_DIR, *, builder=None, generator=None, ask_limit=No
             raise HTTPException(503, 'ANTHROPIC_API_KEY is not configured.')
         try:
             async with asyncio.timeout(ask_timeout):
-                chunks, signature = await retrieval.run(retrieve_question, request.question)
+                chunks, signature = await retrieval.run(retrieve_question, request.question, request.top_k)
                 if not chunks:
                     raise IndexUnavailable('没有可用的已索引内容，请等待索引更新。')
                 answer = await application.state.generator(request.question, chunks)
@@ -151,7 +156,7 @@ def create_app(directory=DATA_DIR, *, builder=None, generator=None, ask_limit=No
                 return AskResponse(
                     answer=answer,
                     sources=[Source(source=name, page=page) for name, page in sources],
-                    retrieval=RetrievalDetails(chunks=[
+                    retrieval=RetrievalDetails(top_k=request.top_k, chunks=[
                         RetrievedChunk(rank=rank, text=text, **meta)
                         for rank, (text, meta) in enumerate(chunks, start=1)
                     ]),

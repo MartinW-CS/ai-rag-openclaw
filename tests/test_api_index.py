@@ -37,10 +37,16 @@ class ChromaIntegrationTests(unittest.TestCase):
             directory = Path(directory)
             (directory / 'a.pdf').write_bytes(pdf_bytes('First source.'))
             (directory / 'b.pdf').write_bytes(pdf_bytes('Second source.'))
+            for i in range(8):
+                (directory / f'extra-{i}.pdf').write_bytes(pdf_bytes(f'Extra source {i}.'))
             builder = ApiIndexBuilder()
             old, new = builder(directory), builder(directory)
             self.assertNotEqual(old.collection.name, new.collection.name)
             self.assertEqual(TinyEmbedder.instances, 2)  # one builder model + one query model
+            allowed = [path.name for path in directory.glob('*.pdf')]
+            for top_k in (2, 4, 6, 8):
+                self.assertEqual(len(old.retrieve('Q', allowed, top_k)), top_k)
+            self.assertEqual(len(old.retrieve('Q', ['a.pdf'], 8)), 1)
             self.assertEqual({meta['source'] for _, meta in old.retrieve('Q', ['a.pdf'])}, {'a.pdf'})
             matches = old.retrieve('Q', ['a.pdf', 'b.pdf'])
             distances = [meta['distance'] for _, meta in matches]

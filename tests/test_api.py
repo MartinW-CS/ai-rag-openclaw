@@ -75,3 +75,25 @@ class ApiTests(ApiFixture, unittest.TestCase):
         self.assertEqual(len(data['sources']), 1)
         self.assertEqual([chunk['text'] for chunk in chunks], [text for text, _ in generator.call_args.args[1]])
         self.assertNotIn('embeddings', data['retrieval'])
+
+    def test_top_k_validation_default_and_generation_context(self):
+        self.upload(data=pdf_bytes('retrieval context ' * 400)); self.ready()
+        generator = AsyncMock(return_value='Answer')
+        self.app.state.generator = generator
+        for value in (None, 2, 4, 6, 8):
+            body = {'question': 'Q'}
+            if value is not None:
+                body['top_k'] = value
+            response = self.client.post('/ask', json=body)
+            self.assertEqual(response.status_code, 200)
+            data = response.json()['retrieval']
+            self.assertEqual(data['top_k'], value or 4)
+            self.assertEqual(len(data['chunks']), value or 4)
+            self.assertEqual([chunk['text'] for chunk in data['chunks']], [text for text, _ in generator.call_args.args[1]])
+        for invalid in (0, 1, 3, 5, 7, 10, -2, True, '4', 4.0, None):
+            self.assertEqual(self.client.post('/ask', json={'question': 'Q', 'top_k': invalid}).status_code, 422)
+        self.client.delete('/documents', params={'filename': 'guide.pdf'})
+        self.upload(data=pdf_bytes('Short document.')); self.ready()
+        data = self.client.post('/ask', json={'question': 'Q', 'top_k': 8}).json()['retrieval']
+        self.assertEqual(data['top_k'], 8)
+        self.assertEqual(len(data['chunks']), 1)

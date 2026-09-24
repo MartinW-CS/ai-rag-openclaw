@@ -27,11 +27,11 @@ class FakeIndex:
         self.chunks = load_and_chunk_pdfs(directory)
         self.closed = False
 
-    def retrieve(self, question, allowed):
+    def retrieve(self, question, allowed, top_k=4):
         assert not self.closed
         return [(chunk['text'], {'source': chunk['source'], 'page': chunk['page'], 'chunk_id': f'chunk-{i}',
                                  'index_id': 'test-index', 'distance': float(i) / 10, 'similarity_score': 1.0 - i / 10})
-                for i, chunk in enumerate(self.chunks) if chunk['source'] in allowed][:4]
+                for i, chunk in enumerate(self.chunks) if chunk['source'] in allowed][:top_k]
 
     def close(self):
         self.closed = True
