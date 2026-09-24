@@ -2,6 +2,9 @@
 import asyncio
 from contextlib import asynccontextmanager
 import fcntl
+import errno
+import stat
+from urllib.parse import quote
 import io
 import logging
 import os
@@ -12,6 +15,8 @@ import uuid
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile
+from starlette.responses import StreamingResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, Field, FiniteFloat, StringConstraints
 
 from .concurrency import AdmissionMiddleware, BoundedExecutor, Busy
@@ -174,6 +179,48 @@ def create_app(directory=DATA_DIR, *, builder=None, generator=None, ask_limit=No
     @application.get('/documents', response_model=list[Document])
     def list_documents():
         return service.documents()
+
+    @application.get('/documents/{filename:path}/file')
+    def document_file(filename: str):
+        path = safe_document_path(directory, filename)
+        # Bind the response to an opened file, not a path that can be swapped later.
+        try:
+            with service.condition:
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                stream = os.fdopen(descriptor, 'rb')
+                try:
+                    info = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(info.st_mode):
+                        raise HTTPException(400, '只能预览普通 PDF 文件。')
+                    if info.st_size > MAX_PDF_BYTES:
+                        raise HTTPException(413, 'PDF 不能超过 10 MB。')
+                    if stream.read(5) != b'%PDF-':
+                        raise HTTPException(422, '文件不是有效的 PDF。')
+                    stream.seek(0)
+                except BaseException:
+                    stream.close()
+                    raise
+        except FileNotFoundError:
+            raise HTTPException(404, '文档不存在或已被移除。') from None
+        except OSError as error:
+            if error.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise HTTPException(400, '无效的文档路径。') from None
+            raise
+
+        def body():
+            try:
+                while block := stream.read(65536):
+                    yield block
+            finally:
+                stream.close()
+
+        return StreamingResponse(
+            body(), media_type='application/pdf',
+            headers={'Content-Length': str(info.st_size), 'Cache-Control': 'no-store',
+                     'X-Content-Type-Options': 'nosniff',
+                     'Content-Disposition': "inline; filename*=UTF-8''" + quote(filename, safe='')},
+            background=BackgroundTask(stream.close),
+        )
 
     @application.post('/index/retry', status_code=202)
     def retry_index():

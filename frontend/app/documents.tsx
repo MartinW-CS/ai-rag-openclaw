@@ -1,8 +1,8 @@
 'use client';
 import { useRef, useState } from 'react';
 export type Document = { name: string; size: number; status: 'queued' | 'indexing' | 'indexed' | 'failed' };
-type Props = { documents: Document[]; loading: boolean; error: string; busy: boolean; working: boolean; setWorking: (value: boolean) => void; refresh: () => Promise<void>; changed: () => void };
-export function DocumentSidebar({ documents, loading, error, busy, working, setWorking, refresh, changed }: Props) {
+type Props = { onOpen: (filename: string, page: number) => void; selectedDocument: string | null; documents: Document[]; loading: boolean; error: string; busy: boolean; working: boolean; setWorking: (value: boolean) => void; refresh: () => Promise<void>; changed: () => void };
+export function DocumentSidebar({ onOpen, selectedDocument, documents, loading, error, busy, working, setWorking, refresh, changed }: Props) {
   const input = useRef<HTMLInputElement>(null);
   const [message, setMessage] = useState('');
   const [failure, setFailure] = useState('');
@@ -33,6 +33,6 @@ export function DocumentSidebar({ documents, loading, error, busy, working, setW
     <div aria-live="polite">{message && <p>{message}</p>}{failure && <p role="alert" className="document-error">{failure}</p>}</div>
     <div className="section-label source-label">知识库文档 <span>{documents.length}</span></div><button className="refresh-documents" disabled={disabled || loading} onClick={() => void refresh()}>{loading ? '正在读取…' : '刷新列表 ↻'}</button>
     {error && <p role="alert" className="document-error">{error}</p>}{!loading && !error && !documents.length && <p>还没有文档。上传第一份 PDF 后即可提问。</p>}
-    {documents.map(document => <div className="document-row" key={document.name}><div className="document-title">▤ <strong>{document.name}</strong></div><div className="document-meta"><span>{Math.max(1, Math.round(document.size / 1024))} KB · {({ indexed: '已就绪', queued: '排队中', indexing: '索引中', failed: '处理失败' })[document.status]}</span><button disabled={disabled} aria-label={`移除 ${document.name}`} onClick={() => setRemoving(document.name)}>移除</button></div>{removing === document.name && <div className="remove-confirm"><p>从知识库移除此文档？</p><button disabled={disabled} onClick={() => void mutate(`/api/documents?filename=${encodeURIComponent(document.name)}`, { method: 'DELETE' }, '文档已移除，后台正在更新索引。')}>确认移除</button><button disabled={disabled} onClick={() => setRemoving(null)}>取消</button></div>}</div>)}
+    {documents.map(document => <div className="document-row" key={document.name}><button type="button" className={`document-title document-open ${selectedDocument === document.name ? 'selected' : ''}`} onClick={() => onOpen(document.name, 1)} aria-label={`预览 ${document.name}`}>▤ <strong>{document.name}</strong></button><div className="document-meta"><span>{Math.max(1, Math.round(document.size / 1024))} KB · {({ indexed: '已就绪', queued: '排队中', indexing: '索引中', failed: '处理失败' })[document.status]}</span><button disabled={disabled} aria-label={`移除 ${document.name}`} onClick={() => setRemoving(document.name)}>移除</button></div>{removing === document.name && <div className="remove-confirm"><p>从知识库移除此文档？</p><button disabled={disabled} onClick={() => void mutate(`/api/documents?filename=${encodeURIComponent(document.name)}`, { method: 'DELETE' }, '文档已移除，后台正在更新索引。')}>确认移除</button><button disabled={disabled} onClick={() => setRemoving(null)}>取消</button></div>}</div>)}
     {documents.some(document => document.status === 'failed') && <button className="refresh-documents" disabled={disabled} onClick={() => void mutate('/api/index/retry', { method: 'POST' }, '已重新排队处理。')}>重试索引</button>}<p className="index-note">文档会在后台自动处理。更新期间仍可查询已就绪的文档。</p><div className="sidebar-foot">基于文档回答 · 保留来源</div></>;
 }

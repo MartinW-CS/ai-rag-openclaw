@@ -15,7 +15,7 @@ export type RetrievalDetails = {
   chunks: RetrievedChunk[];
 };
 
-export function RetrievalInspector({ retrieval }: { retrieval?: RetrievalDetails }) {
+export function RetrievalInspector({ retrieval, onOpen }: { retrieval?: RetrievalDetails; onOpen: (filename: string, page: number) => void }) {
   if (!retrieval) {
     return <section className="retrieval-inspector"><h3>检索片段</h3><p>本次回答未包含检索详情，请更新后端后重新提问。</p></section>;
   }
@@ -33,7 +33,7 @@ export function RetrievalInspector({ retrieval }: { retrieval?: RetrievalDetails
           <details className="retrieval-chunk" key={`${chunk.index_id}:${chunk.chunk_id}`}>
             <summary>
               <span className="chunk-rank">#{chunk.rank}</span>
-              <span className="chunk-origin"><strong>{chunk.source}</strong><small>第 {chunk.page} 页</small></span>
+              <span className="chunk-origin"><button type="button" className="chunk-source-link" onClick={event => { event.stopPropagation(); onOpen(chunk.source, chunk.page); }} aria-label={`查看片段 ${chunk.rank} 的原文：${chunk.source} 第 ${chunk.page} 页`}><strong>{chunk.source}</strong><small>第 {chunk.page} 页 · 查看原文 ↗</small></button></span>
               <span className="chunk-scores"><span>余弦相似度 <b>{chunk.similarity_score === null ? '不可用' : chunk.similarity_score.toFixed(3)}</b></span><span>L2 距离² <b>{chunk.distance.toFixed(4)}</b></span></span>
               <span className="chunk-toggle" aria-hidden="true">⌄</span>
               <span className="chunk-preview">{chunk.text}</span>

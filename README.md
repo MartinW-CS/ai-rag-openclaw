@@ -348,7 +348,7 @@ The frontend proxies requests, so no CORS configuration is needed.
 连接状态仅表示后端存活，不表示密钥或索引已就绪。后台初始化可能需要下载模型。
 新版侧栏支持 PDF 上传、完整文档列表和移除，文档变更后在后台重建索引。
 上传后显示“排队中 → 索引中 → 已就绪 / 处理失败”，失败时可重试；上传不会调用 Claude。
-Streamlit 入口继续保留。检索片段检查器已接入；PDF 原文预览和页码跳转尚未接入。
+Streamlit 入口继续保留。检索片段检查器、PDF 原文预览和来源页码跳转已接入。
 
 Frontend validation / 前端检查：
 
@@ -461,7 +461,50 @@ rendered literally, not interpreted as HTML/Markdown. The panel describes the
 context supplied to the model, not a claim that every chunk supports every sentence.
 Older API responses without `retrieval` show an explicit unavailable message.
 
-Top-K remains 4. This step does not add PDF preview, citation navigation, retrieval
-controls, or chat history. Those remain the next Phase 4 steps. Real Claude generation
-still needs an end-to-end validation using a configured `ANTHROPIC_API_KEY` before
-final demo packaging; mocked generation in tests is not that validation.
+Top-K remains 4. Retrieval controls and chat history remain later Phase 4 steps.
+Real Claude generation still needs an end-to-end validation using a configured
+`ANTHROPIC_API_KEY` before final demo packaging; mocked generation in tests is not
+that validation.
+
+## Source Navigation + PDF Preview / 原文页预览
+
+Click a source card or an Inspector chunk's filename/page to open that PDF at the
+referenced page. Clicking a document in the sidebar opens page 1. The preview is
+closed by default, appears on the right on desktop, and fills the screen on mobile.
+It supports previous/next page, direct page entry, keyboard activation, Escape to
+close, and focus return to the originating button. Mobile keyboard focus stays
+inside the preview while it is open.
+
+`GET /documents/{filename}/file` streams the current PDF through the same-origin
+Next.js proxy `/api/documents/{filename}/file`. The backend reuses filename/path
+validation, rejects symlinks and non-regular files, checks the PDF header and 10 MiB
+limit, and opens with `O_NOFOLLOW` to prevent symlink replacement between validation
+and reading. The open file descriptor pins an in-flight response across API deletion
+or replacement. Responses use `application/pdf`, inline disposition, `nosniff`, and
+`no-store`; missing or removed documents return 404. This endpoint uses the existing
+single-process deployment model and does not add authentication.
+
+The viewer uses react-pdf/PDF.js with locally served worker, CMaps, fonts, and WASM.
+`npm run dev` and `npm run build` copy the matching installed assets into the ignored
+`frontend/public/pdfjs/` directory automatically. There is no runtime CDN dependency.
+This version downloads the full PDF (up to 10 MiB); byte-range loading is not added.
+PDF annotation links/forms are disabled. Loading, missing-file, parse, encryption,
+and rendering failures show an explicit message.
+
+Preview displays the **current file**, not an immutable historical document version.
+An out-of-range citation page shows a warning and the nearest valid page. Uploading
+or removing a document in this UI closes the preview and clears the previous answer.
+
+Validation:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+npm --prefix frontend run build
+```
+
+Backend coverage includes returned PDF bytes/headers, Unicode filenames, deletion,
+path traversal, symlinks (including replacement after validation), and size/header
+checks. Browser smoke checks use the real three-page project PDF and real retrieval
+with a clearly labeled generator test double: sidebar → page 1, keyboard source card
+→ page 3, Inspector → page 2, manual jump, Escape/focus return, and a 390px mobile
+preview. These checks do **not** count as real Claude E2E.
