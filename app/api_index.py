@@ -1,6 +1,21 @@
 """API indexes use unique collections; legacy Streamlit helpers stay unchanged."""
+import math
 from threading import Lock
 import uuid
+
+
+def cosine_similarity(left, right):
+    """Actual cosine similarity, independent of the L2 ranking; undefined for zero vectors."""
+    if len(left) != len(right):
+        raise ValueError('Embedding dimensions differ')
+    left_norm = math.sqrt(math.fsum(float(value) ** 2 for value in left))
+    right_norm = math.sqrt(math.fsum(float(value) ** 2 for value in right))
+    if left_norm == 0 or right_norm == 0:
+        return None
+    score = math.fsum(float(a) * float(b) for a, b in zip(left, right)) / (left_norm * right_norm)
+    if not math.isfinite(score):
+        return None
+    return max(-1.0, min(1.0, score))
 
 
 class ApiIndex:
@@ -17,8 +32,17 @@ class ApiIndex:
             query_embeddings=embedding,
             n_results=min(TOP_K, self.collection.count()),
             where={'source': {'$in': allowed}},
+            include=['documents', 'metadatas', 'distances', 'embeddings'],
         )
-        return list(zip(result['documents'][0], result['metadatas'][0]))
+        return [
+            (text, {**metadata, 'chunk_id': chunk_id, 'index_id': self.collection.name,
+                    'distance': float(distance),
+                    'similarity_score': cosine_similarity(embedding[0], vector)})
+            for chunk_id, text, metadata, distance, vector in zip(
+                result['ids'][0], result['documents'][0], result['metadatas'][0],
+                result['distances'][0], result['embeddings'][0], strict=True,
+            )
+        ]
 
     def close(self):
         self.client.delete_collection(self.collection.name)
@@ -45,7 +69,7 @@ class ApiIndexBuilder:
         if self.query_embedder is None:
             self.query_embedder = SentenceTransformer(EMBED_MODEL)
         client = chromadb.EphemeralClient()
-        collection = client.create_collection('api-' + uuid.uuid4().hex)
+        collection = client.create_collection('api-' + uuid.uuid4().hex, metadata={'hnsw:space': 'l2'})
         try:
             for offset in range(0, len(chunks), 128):
                 batch = chunks[offset:offset + 128]

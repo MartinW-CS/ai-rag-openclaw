@@ -29,8 +29,9 @@ class FakeIndex:
 
     def retrieve(self, question, allowed):
         assert not self.closed
-        return [(chunk['text'], {'source': chunk['source'], 'page': chunk['page']})
-                for chunk in self.chunks if chunk['source'] in allowed][:4]
+        return [(chunk['text'], {'source': chunk['source'], 'page': chunk['page'], 'chunk_id': f'chunk-{i}',
+                                 'index_id': 'test-index', 'distance': float(i) / 10, 'similarity_score': 1.0 - i / 10})
+                for i, chunk in enumerate(self.chunks) if chunk['source'] in allowed][:4]
 
     def close(self):
         self.closed = True

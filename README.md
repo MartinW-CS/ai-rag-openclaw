@@ -348,7 +348,7 @@ The frontend proxies requests, so no CORS configuration is needed.
 连接状态仅表示后端存活，不表示密钥或索引已就绪。后台初始化可能需要下载模型。
 新版侧栏支持 PDF 上传、完整文档列表和移除，文档变更后在后台重建索引。
 上传后显示“排队中 → 索引中 → 已就绪 / 处理失败”，失败时可重试；上传不会调用 Claude。
-Streamlit 入口继续保留。原文预览和检索片段检查器尚未接入。
+Streamlit 入口继续保留。检索片段检查器已接入；PDF 原文预览和页码跳转尚未接入。
 
 Frontend validation / 前端检查：
 
@@ -437,3 +437,31 @@ Before multi-instance deployment, move document metadata and files to shared dur
 storage, replace the in-process index worker with a durable task queue, and use a shared
 vector database with coordinated versions. Authentication and per-user quotas are also
 required for a shared service; this version remains localhost-only.
+
+
+## Retrieval Inspector / 检索片段检查器
+
+Each successful `/ask` response adds a `retrieval` object while retaining `answer`
+and `sources`. Its `chunks` are exactly the ordered, source-filtered context chunks
+passed to Claude, including full `text`, `source`, `page`, one-based `rank`,
+`chunk_id`, `index_id`, `distance`, and `similarity_score`. Chunk IDs are scoped to
+an index version; they are not permanent document identifiers. The source cards
+remain deduplicated by file/page, while the inspector shows every context chunk.
+
+Ranking is unchanged: API collections explicitly use **squared L2 distance**, with
+smaller values first (`distance_metric: "squared_l2"`). The additional score is
+**cosine similarity**, calculated directly from the query and returned chunk
+embeddings (`similarity_metric: "cosine"`), ranging from -1 to 1. It is not `1 - L2`
+and is not confidence, correctness, or a percentage. Zero-length vectors yield
+`null`, displayed as “不可用”. Vectors themselves are not included in the HTTP response.
+
+The UI shows filename, page, rank, both scores, and a two-line text preview.
+Click or use the keyboard to expand each chunk and read its full text. Text is
+rendered literally, not interpreted as HTML/Markdown. The panel describes the
+context supplied to the model, not a claim that every chunk supports every sentence.
+Older API responses without `retrieval` show an explicit unavailable message.
+
+Top-K remains 4. This step does not add PDF preview, citation navigation, retrieval
+controls, or chat history. Those remain the next Phase 4 steps. Real Claude generation
+still needs an end-to-end validation using a configured `ANTHROPIC_API_KEY` before
+final demo packaging; mocked generation in tests is not that validation.

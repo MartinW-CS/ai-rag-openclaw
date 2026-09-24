@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from unittest.mock import patch, AsyncMock
 
-from support import ApiFixture
+from support import ApiFixture, pdf_bytes
 
 
 class ApiTests(ApiFixture, unittest.TestCase):
@@ -32,7 +32,18 @@ class ApiTests(ApiFixture, unittest.TestCase):
         self.app.state.generator = generator
         response = self.client.post('/ask', json={'question': ' Q '})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {'answer': 'Grounded answer', 'sources': [{'source': 'guide.pdf', 'page': 1}]})
+        data = response.json()
+        self.assertEqual(data['answer'], 'Grounded answer')
+        self.assertEqual(data['sources'], [{'source': 'guide.pdf', 'page': 1}])
+        self.assertEqual(data['retrieval']['distance_metric'], 'squared_l2')
+        self.assertEqual(data['retrieval']['similarity_metric'], 'cosine')
+        self.assertEqual(data['retrieval']['chunks'][0], {
+            'rank': 1, 'chunk_id': 'chunk-0', 'index_id': 'test-index',
+            'source': 'guide.pdf', 'page': 1, 'text': 'A document about retrieval.',
+            'distance': 0.0, 'similarity_score': 1.0,
+        })
+        self.assertEqual([chunk['text'] for chunk in data['retrieval']['chunks']],
+                         [text for text, _ in generator.call_args.args[1]])
         self.assertEqual(generator.call_args.args[0], 'Q')
 
     def test_internal_error_is_not_exposed(self):
@@ -49,3 +60,18 @@ class ApiTests(ApiFixture, unittest.TestCase):
             yield b'x' * 20000
             yield b'x' * 20000
         self.assertEqual(self.client.post('/ask', content=chunks()).status_code, 413)
+
+
+    def test_inspector_preserves_chunks_but_sources_are_deduplicated(self):
+        self.upload(data=pdf_bytes('retrieval context ' * 80))
+        self.ready()
+        generator = AsyncMock(return_value='Answer')
+        self.app.state.generator = generator
+        data = self.client.post('/ask', json={'question': 'Q'}).json()
+        chunks = data['retrieval']['chunks']
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual([chunk['rank'] for chunk in chunks], list(range(1, len(chunks) + 1)))
+        self.assertEqual(len({chunk['chunk_id'] for chunk in chunks}), len(chunks))
+        self.assertEqual(len(data['sources']), 1)
+        self.assertEqual([chunk['text'] for chunk in chunks], [text for text, _ in generator.call_args.args[1]])
+        self.assertNotIn('embeddings', data['retrieval'])

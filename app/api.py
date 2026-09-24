@@ -7,12 +7,12 @@ import logging
 import os
 from pathlib import Path
 import tempfile
-from typing import Annotated
+from typing import Annotated, Literal
 import uuid
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, Field, FiniteFloat, StringConstraints
 
 from .concurrency import AdmissionMiddleware, BoundedExecutor, Busy
 from .index_service import IndexService, IndexUnavailable
@@ -32,9 +32,27 @@ class Source(BaseModel):
     page: int
 
 
+class RetrievedChunk(BaseModel):
+    rank: int = Field(ge=1)
+    chunk_id: str
+    index_id: str
+    source: str
+    page: int
+    text: str
+    distance: FiniteFloat
+    similarity_score: FiniteFloat | None
+
+
+class RetrievalDetails(BaseModel):
+    distance_metric: Literal['squared_l2'] = 'squared_l2'
+    similarity_metric: Literal['cosine'] = 'cosine'
+    chunks: list[RetrievedChunk]
+
+
 class AskResponse(BaseModel):
     answer: str
     sources: list[Source]
+    retrieval: RetrievalDetails
 
 
 class Document(BaseModel):
@@ -125,7 +143,14 @@ def create_app(directory=DATA_DIR, *, builder=None, generator=None, ask_limit=No
                 if service.filter_current(chunks, signature) != chunks:
                     raise HTTPException(409, '回答期间文档发生变化，请重新提问。')
                 sources = dict.fromkeys((meta['source'], meta['page']) for _, meta in chunks)
-                return AskResponse(answer=answer, sources=[Source(source=name, page=page) for name, page in sources])
+                return AskResponse(
+                    answer=answer,
+                    sources=[Source(source=name, page=page) for name, page in sources],
+                    retrieval=RetrievalDetails(chunks=[
+                        RetrievedChunk(rank=rank, text=text, **meta)
+                        for rank, (text, meta) in enumerate(chunks, start=1)
+                    ]),
+                )
         except HTTPException:
             raise
         except Busy as error:
