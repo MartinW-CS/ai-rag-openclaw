@@ -1,537 +1,333 @@
-# Agentic RAG System with Claude and ChromaDB
+# Knowledge AI — Full-Stack Agentic RAG System
 
-[中文版本](#基于-claude-与-chromadb-的智能体式-rag-系统)
+Ask grounded questions over PDFs, inspect the evidence sent to Claude, and open the source page behind an answer.
 
-An end-to-end AI-powered document search and question-answering system built with Retrieval-Augmented Generation (RAG). Upload PDFs, ask questions, and get grounded answers with citations — powered by Anthropic's Claude and exposed as an OpenClaw agent skill.
+Knowledge AI combines PDF ingestion, local embeddings, ChromaDB retrieval, Claude generation, and page-level source navigation in a **FastAPI + Next.js / TypeScript** application. A separate Claude tool-use agent can search the document library through the OpenClaw entrypoint.
 
----
+Built with production-style engineering practices—bounded concurrency, background indexing, and document race protection—within a **local, single-worker application**.
+
+[Demo](#demo) · [Architecture](#architecture) · [Quick start](#quick-start) · [API](#api) · [Testing](#testing) · [中文概览](#中文概览)
 
 ## Demo
-![Demo screenshot](assets/demo.png)
 
----
+![Knowledge AI showing a real document answer with a page-level citation, Top-K control, and session history](assets/knowledge-ai-answer.png)
 
-## How it works
+*Screenshot from the maintainer's manual Claude E2E session on October 5, 2026.*
 
-1. **Ingest** — PDFs are loaded, split into chunks, and embedded using `sentence-transformers`
-2. **Store** — Embeddings are persisted in a ChromaDB vector store
-3. **Retrieve** — On each query, the top-k most relevant chunks are fetched
-4. **Generate** — Claude receives the retrieved context and produces a citation-backed answer
-5. **Serve** — Accessible via a Streamlit UI or as a callable OpenClaw skill
+| Step | Observed result |
+| --- | --- |
+| Question | “Who is the TA of this course?” |
+| Retrieved evidence | `Lecture0-1.pdf`, page 5: “Teaching Staff … TAs: Shenshen Han” |
+| Inspector | Page 5 ranked #1 with Top-K 4; cosine similarity 0.459, squared L2 distance 1.0825 |
+| Answer | “The TA of this course is Shenshen Han.” |
+| Citation | `Lecture0-1.pdf`, page 5 |
 
----
+The demo follows the evidence chain: **question → retrieved chunks → Claude answer → source card → PDF page**. The course PDF is not bundled; use your own text-based PDF or the included `app/data/RAG_Project_Guide.pdf` to reproduce the workflow.
 
-## Project structure
+## Highlights
 
+- **Inspect the actual context.** Retrieval Inspector shows ordered chunks, full text, file/page, rank, squared L2 distance, and cosine similarity for the context passed to Claude.
+- **Navigate to the evidence.** Source cards and Inspector links open the corresponding PDF page. The preview supports direct page entry, keyboard navigation, Escape to close, focus restoration, and mobile fullscreen mode.
+- **Compare retrieval scope.** Choose Top-K **2 / 4 / 6 / 8**, default **4**. Each result retains its requested limit and actual chunk count.
+- **Revisit successful questions.** Keep the latest **10** answer snapshots in the current tab's `sessionStorage`, including sources and retrieval details. History survives refresh; each question remains independent.
+- **Manage PDFs without blocking questions.** Upload, list, remove, track indexing status, and retry failed builds. Existing ready documents remain queryable during updates.
+- **Handle concurrent work explicitly.** Admission limits, deadlines, bounded retrieval execution, versioned index publication, and deletion checks protect the request lifecycle.
+- **Ground generation in retrieved text.** Prompts instruct Claude to cite sources and report insufficient context. These instructions are guardrails, not a guarantee of correctness.
+- **Explore agent-driven retrieval separately.** The OpenClaw entrypoint exposes `search_documents` to a Claude tool-use loop; the web application uses a direct retrieval-and-generation path.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    UI[Next.js + TypeScript UI] --> Proxy[Same-origin server routes]
+    Proxy --> API[FastAPI: bounded request admission]
+    API -->|Upload / remove| Files[Local PDF library]
+    Files --> Worker[Background index worker]
+    Worker --> Parse[pypdf: text + page metadata]
+    Parse --> Split[500-character chunks / 50-character overlap]
+    Split --> Embed[Local sentence-transformers embeddings]
+    Embed --> Candidate[New in-memory Chroma collection]
+    Candidate -->|Publish if document state still matches| Ready[Ready index version]
+    API -->|Question + Top-K| Retrieve[Bounded retrieval executor]
+    Ready --> Retrieve
+    Retrieve --> Check[Filter removed or replaced sources]
+    Check --> Claude[Async Claude generation]
+    Claude --> Verify[Recheck source versions]
+    Verify --> Evidence[Answer + sources + ordered retrieval chunks]
+    Evidence --> UI
+    UI -->|Source card / Inspector link| PDF[PDF.js preview at cited page]
+    PDF -->|Safe file endpoint via proxy| API
 ```
-ai-rag-openclaw/
-├── app/
-│   ├── data/               # PDF documents (default: RAG_Project_Guide.pdf)
-│   ├── ingest.py           # PDF loading and chunking
-│   ├── retriever.py        # Vector search against ChromaDB
-│   ├── generator.py        # Claude API call with retrieved context
-│   ├── rag_pipeline.py     # Connects retrieval and generation
-│   ├── streamlit_app.py    # Streamlit frontend
-│   └── openclaw_skill.py   # Wraps RAG as a callable OpenClaw skill
-├── assets/
-│   └── demo.png            # Demo screenshot
-├── .env                    # API keys (not committed)
-├── .gitignore
-├── requirements.txt
-└── README.md
-```
 
----
+The API indexes PDFs at startup and after document changes. Indexes are **in memory** and rebuilt on restart; the PDF files remain on disk. Query and background embedding use separate reusable model instances. A ready index remains available while a replacement is built.
 
-## Setup
+The legacy Streamlit UI and the CLI agent use the original synchronous helpers; they do not inherit the API's request admission or background-index lifecycle.
 
-### 1. Clone the repo
+### Stack
+
+| Layer | Implementation |
+| --- | --- |
+| Web UI | Next.js, React, TypeScript, React Markdown |
+| PDF preview | react-pdf / PDF.js with local worker, fonts, CMaps, and WASM |
+| HTTP API | FastAPI, Pydantic, Uvicorn |
+| PDF extraction | pypdf; page-aware character chunking |
+| Embeddings | sentence-transformers, `all-MiniLM-L6-v2` |
+| Vector retrieval | ChromaDB ephemeral collections; squared L2 ranking |
+| Generation | Anthropic async client; model configured in `app/generator.py` |
+| Agent entrypoint | Claude `search_documents` tool loop in `app/openclaw_skill.py` |
+| Legacy UI | Streamlit |
+| Visual system | [DESIGN.md](DESIGN.md) |
+
+## Quick start
+
+### 1. Install the backend
+
+Use **Python 3.11+ on macOS or Linux** (the API uses POSIX file locks) and **Node.js 22.18+** for the frontend and native TypeScript history tests.
 
 ```bash
 git clone https://github.com/MartinW-CS/ai-rag-openclaw.git
 cd ai-rag-openclaw
-```
-
-### 2. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Set your API key
-
-Create a `.env` file in the project root:
-
-```
-ANTHROPIC_API_KEY=your-api-key-here
-```
-
----
-
-## Usage
-
-### Streamlit UI
-
-```bash
-streamlit run app/streamlit_app.py
-```
-
-Once the Streamlit web interface is launched, you can directly upload local PDF files and engage in Q&A regarding the document's content.
-
-### OpenClaw skill
-
-The `openclaw_skill.py` module exposes a `run(input)` entrypoint:
-
-```python
-from app.openclaw_skill import run
-
-result = run({"query": "What is RAG?", "doc_path": "data/my_document.pdf"})
-print(result["answer"])
-# Sources: result["sources"]
-```
-
-Or test it directly from the terminal:
-
-```bash
-python app/openclaw_skill.py "What is RAG?"
-```
-
----
-
-## Answer format
-
-All answers follow the citation format defined in the system prompt:
-
-```
-Answer:
-<grounded response based on retrieved context>
-
-Sources:
-- <filename>, Page <n>
-- <filename>, Page <n>
-```
-
-If the retrieved context is insufficient, the assistant explicitly states that the answer cannot be determined.
-
----
-
-## Tech stack
-
-| Component | Library |
-|---|---|
-| LLM | [Anthropic Claude](https://www.anthropic.com) |
-| Vector store | [ChromaDB](https://www.trychroma.com) |
-| Embeddings | [sentence-transformers](https://www.sbert.net) |
-| PDF parsing | pypdf |
-| Frontend | [Streamlit](https://streamlit.io) |
-| Agent layer | OpenClaw |
-
----
-
-## Evaluation
-
-The system is designed to be evaluated across:
-
-- **Chunk size** — smaller chunks improve precision, larger chunks preserve context
-- **Top-k retrieval** — controls how much context is passed to Claude
-- **Prompt design** — system prompt tuning to reduce hallucination and improve citation accuracy
-
----
-
-## License
-
-MIT
-
----
-
-# 基于 Claude 与 ChromaDB 的智能体式 RAG 系统
-
-一个端到端的 AI 文档检索与问答系统，基于检索增强生成（RAG）技术构建。支持上传 PDF、进行自然语言问答，并返回带引用来源的答案；系统由 Anthropic Claude 驱动，并集成 Agent Tool Calling 能力。
-
----
-
-## 演示
-![Demo screenshot](assets/demo.png)
-
----
-
-## 工作原理
-
-1. **文档摄入** — 加载 PDF，切分为文本块，并使用 `sentence-transformers` 生成向量嵌入
-2. **向量存储** — 将嵌入持久化存储至 ChromaDB 向量数据库
-3. **检索** — 每次提问时，从向量库中检索最相关的 top-k 文本块
-4. **生成** — Claude 接收检索到的上下文，生成带引用的答案
-5. **服务** — 可通过 Streamlit 界面访问，或作为 OpenClaw 技能调用
-
----
-
-## 项目结构
-
-```
-ai-rag-openclaw/
-├── app/
-│   ├── data/               # PDF 文档（默认：RAG_Project_Guide.pdf）
-│   ├── ingest.py           # PDF 加载与文本分块
-│   ├── retriever.py        # 基于 ChromaDB 的向量检索
-│   ├── generator.py        # 调用 Claude API 生成答案
-│   ├── rag_pipeline.py     # 连接检索与生成的主管道
-│   ├── streamlit_app.py    # Streamlit 前端界面
-│   └── openclaw_skill.py   # 将 RAG 封装为可调用的 OpenClaw 技能
-├── assets/
-│   └── demo.png            # 演示截图
-├── .env                    # API 密钥（不提交至 Git）
-├── .gitignore
-├── requirements.txt
-└── README.md
-```
-
----
-
-## 环境配置
-
-### 1. 克隆仓库
-
-```bash
-git clone https://github.com/MartinW-CS/ai-rag-openclaw.git
-cd ai-rag-openclaw
-```
-
-### 2. 安装依赖
-
-```bash
-pip install -r requirements.txt
-```
-
-### 3. 配置 API 密钥
-
-在项目根目录创建 `.env` 文件：
-
-```
-ANTHROPIC_API_KEY=your-api-key-here
-```
-
----
-
-## 使用方式
-
-### Streamlit 界面
-
-```bash
-streamlit run app/streamlit_app.py
-```
-
-启动 Streamlit Web 界面后，可直接上传本地 PDF，并针对文档内容进行问答。
-
-### OpenClaw 技能调用
-
-`openclaw_skill.py` 模块暴露了一个 `run(input)` 入口函数：
-
-```python
-from app.openclaw_skill import run
-
-result = run({"query": "什么是 RAG？", "doc_path": "data/my_document.pdf"})
-print(result["answer"])
-# 引用来源: result["sources"]
-```
-
-也可直接通过终端测试：
-
-```bash
-python app/openclaw_skill.py "什么是 RAG？"
-```
-
----
-
-## 答案格式
-
-所有答案遵循系统提示词中定义的引用格式：
-
-```
-Answer:
-<基于检索上下文的回答>
-
-Sources:
-- <文件名>, Page <页码>
-- <文件名>, Page <页码>
-```
-
-若检索到的上下文信息不足，助手将明确说明无法确定答案。
-
----
-
-## 技术栈
-
-| 组件 | 库 |
-|---|---|
-| 大语言模型 | [Anthropic Claude](https://www.anthropic.com) |
-| 向量数据库 | [ChromaDB](https://www.trychroma.com) |
-| 文本嵌入 | [sentence-transformers](https://www.sbert.net) |
-| PDF 解析 | pypdf |
-| 前端界面 | [Streamlit](https://streamlit.io) |
-| 智能体层 | OpenClaw |
-
----
-
-## 评估维度
-
-系统围绕以下三个维度进行评估与调优：
-
-- **文本块大小** — 较小的块提高精确度，较大的块保留更多上下文
-- **Top-k 检索数量** — 控制传递给 Claude 的上下文数量
-- **提示词设计** — 优化系统提示词以降低幻觉率并提升引用准确性
-
----
-
-## 许可证
-
-MIT
-## FastAPI API / HTTP 接口
-
-From the repository root / 在仓库根目录运行：
-
-```bash
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install -r requirements.txt
-python -m uvicorn app.api:app --reload
 ```
 
-Configure `ANTHROPIC_API_KEY` in the root `.env` and place PDFs in `app/data/`.
-A background worker builds the in-memory index on startup and after document changes.
-The initial build may download the embedding model. Questions use the last ready
-version; before any version is ready they return 503 with Retry-After.
-Run exactly one API worker per document directory. Streamlit remains available.
+Create `.env` in the repository root:
 
-在根目录 `.env` 配置 `ANTHROPIC_API_KEY`，将 PDF 放入 `app/data/`。
-服务启动和文档变化后自动在后台建立索引，首次运行可能下载嵌入模型。
-索引未就绪时问答返回 503；更新期间可以查询已有版本。
+```dotenv
+ANTHROPIC_API_KEY=your-api-key-here
+```
+
+Use an Anthropic account with API access and billing configured. Keep this key server-side; do not put it in `NEXT_PUBLIC_*` variables or commit it. Generation sends the question and retrieved document chunks to Anthropic; embedding runs locally.
+
+The checked-in model ID is `claude-sonnet-4-5-20250929` in `app/generator.py`; the CLI agent has its own constant in `app/openclaw_skill.py`. There is no model environment-variable override in this version. If your account cannot access the configured model, update the applicable constant to a model available to your account.
+
+### 2. Start FastAPI
+
+From the repository root, with the virtual environment active:
+
+```bash
+python -m uvicorn app.api:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+The first index build may download the embedding model. Wait for the document status to become ready before asking a question. Only **one API worker per document directory** is supported; an ownership lock rejects a second worker.
+
+- Health: <http://127.0.0.1:8000/health>
+- Interactive API docs: <http://127.0.0.1:8000/docs>
+
+`/health` checks process liveness only. It does not validate Claude credentials or index readiness.
+
+### 3. Start Next.js
+
+In a second terminal:
+
+```bash
+cd ai-rag-openclaw/frontend  # adjust to your checkout location
+npm ci
+cp .env.example .env.local
+npm run dev -- --hostname 127.0.0.1
+```
+
+Open <http://127.0.0.1:3000>. `frontend/.env.local` configures the server-side proxy:
+
+```dotenv
+RAG_API_URL=http://127.0.0.1:8000
+```
+
+The browser calls same-origin Next.js routes; the Anthropic key stays in Python. PDF.js resources are copied locally during `predev` and `prebuild`, with no runtime CDN dependency.
+
+### 4. Try the evidence workflow
+
+1. Upload a PDF containing selectable text, then wait for **已就绪** (ready).
+2. Ask a specific question whose answer you can locate in the document.
+3. Read the answer and expand the Inspector to compare the retrieved text.
+4. Click a source card to open its PDF page.
+5. Change Top-K, ask again, and compare results through session history.
+
+For the bundled project guide, try: **“What are the core architecture steps described in the project guide?”**
+
+## Retrieval and history semantics
+
+**Top-K counts chunks, not PDFs or pages.** Larger values can improve coverage but also add unrelated context and token cost. The API accepts only integers `2`, `4`, `6`, and `8`; omitted `top_k` defaults to `4`. Available content or source filtering can yield fewer chunks than requested.
+
+The Inspector reports two distinct measures:
+
+| Measure | Meaning |
+| --- | --- |
+| Squared L2 distance | The API's ranking metric; smaller values rank first |
+| Cosine similarity | Computed from query/chunk embeddings; range −1 to 1, larger means more similar |
+
+Cosine similarity is not `1 - L2`, answer confidence, or a correctness percentage. Zero-length vectors yield `null`. Embedding vectors are not returned in the response.
+
+`retrieval.chunks` contains the ordered context passed to Claude. Source cards deduplicate that context by file/page; they are retrieval provenance, not a parsed list of every citation in the generated text. Chunk IDs are scoped to an index version.
+
+History saves successful question/answer snapshots, including their original Top-K, sources, and retrieval information. Restoring history makes no new model call. There is no conversation context, database, login, or cross-device synchronization. Storage failures fall back to memory with a visible notice; browser session recovery may restore tab storage.
+
+PDF navigation opens the **current file**, not an archived version of the historical answer's document. Missing files show an error; out-of-range pages show a warning and the nearest valid page. Preview downloads the full PDF; byte-range loading and PDF annotation links/forms are not enabled.
+
+## API
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| GET | `/health` | Process liveness |
+| POST | `/ask` | Independent question with optional `top_k` |
+| GET | `/documents` | Filename, byte size, indexing state |
+| POST | `/documents` | Multipart upload, field `file` |
+| DELETE | `/documents?filename=guide.pdf` | Remove from active library |
+| GET | `/documents/{filename}/file` | Read a validated PDF for preview |
+| POST | `/index/retry` | Retry a failed index build |
 
 ```bash
 curl http://127.0.0.1:8000/health
-# {"status":"ok"}
+
+curl -X POST http://127.0.0.1:8000/documents \
+  -F 'file=@/path/to/guide.pdf'
 
 curl -X POST http://127.0.0.1:8000/ask \
   -H 'Content-Type: application/json' \
-  -d '{"question":"What is RAG?"}'
-# {"answer":"...", "sources":[{"source":"example.pdf", "page":1}]}
+  -d '{"question":"What are the key steps?","top_k":4}'
 ```
 
-`/health` reports process liveness only, without checking Claude or the index.
-`/ask` returns the existing Claude answer plus deduplicated retrieved source/page
-pairs (retrieval provenance, not a guarantee every page was cited in the answer).
-Missing/blank questions return 422; missing credentials or a ready index
-return 503; unexpected processing failures return 500 without exposing
-internal exception details. Interactive API docs: http://127.0.0.1:8000/docs.
+An `/ask` response includes `answer`, `sources`, and `retrieval` (`top_k`, `distance_metric`, `similarity_metric`, and `chunks`). Each chunk includes rank, text, source, page, chunk/index IDs, distance, and similarity score.
 
-接口测试无需密钥、模型下载或 Claude 调用 / API contract tests use mocked RAG dependencies:
+| Status | Typical cause |
+| --- | --- |
+| 409 | Duplicate upload or a retrieved document changed during generation |
+| 413 | File or request body exceeds its limit |
+| 422 | Invalid question/Top-K, encrypted PDF, or PDF without extractable text |
+| 429 | Application capacity or upstream model rate limit; inspect `Retry-After` |
+| 502 | Model service error |
+| 503 | Missing API key or no usable ready index |
+| 504 | Answer deadline or model timeout |
+
+Questions are limited to 8,000 characters. Request bodies are capped before parsing: 32 KiB for questions and 11 MiB for multipart uploads, with a 30-second body-receive deadline. Unexpected processing errors return a generic 500 response.
+
+## Engineering decisions
+
+### Bounded concurrency
+
+| Setting | Default | Role |
+| --- | --- | --- |
+| `RAG_MAX_ASK` | 8 | Admitted API question requests |
+| `RAG_MAX_UPLOAD` | 2 | Admitted API uploads |
+| `RAG_RETRIEVAL_WORKERS` | 2 | Dedicated retrieval executor capacity |
+
+Excess work receives **429 + Retry-After** rather than joining an unbounded queue. Query embedding is serialized on its model instance. Timed-out CPU jobs retain their executor slot until the underlying work finishes.
+
+Questions have a 60-second application deadline. The reusable async Claude client uses a 55-second timeout and zero automatic retries. Next.js uses a 75-second backend deadline and its own fixed per-process limits of 8 questions and 2 uploads; increasing Python limits alone does not increase those frontend limits.
+
+These are resource bounds, not measured production throughput or distributed scaling claims.
+
+### Background indexing and document races
+
+- One background build and one coalesced pending document state prevent a rebuild queue per upload.
+- Each candidate uses a temporary PDF snapshot and a unique Chroma collection. Publication requires the current document signature to still match.
+- Existing readers hold the old version until they finish; retired collections are then removed. Failed builds retain the last ready version and allow explicit retry.
+- Removed/replaced sources are filtered before generation and rechecked before responding. A relevant change during generation discards the answer with 409; an already-sent Claude request cannot be recalled.
+- External file changes are checked every two seconds. The UI polls document status while indexing is in progress.
+- Shutdown drains retrieval/background work. HTTP deadlines cannot force-cancel native CPU calls; a process supervisor is needed to recover a wedged process.
+
+### PDF handling
+
+Uploads must contain extractable text and fit within **10 MiB**. Duplicate filenames return 409 without overwriting; uppercase `.PDF` extensions are normalized. States are `queued`, `indexing`, `indexed`, and `failed`.
+
+Removal moves a file into `app/data/.trash/<id>/`, outside active retrieval. To restore it, move it back into `app/data/` without replacing an existing file. Uploaded PDFs and recovery files are excluded from Git.
+
+The preview endpoint validates filenames, rejects traversal/symlinks/non-regular files, checks the PDF header and size, and opens with `O_NOFOLLOW`. The open descriptor prevents a later path replacement from redirecting an in-flight response. Responses use `application/pdf`, inline disposition, `nosniff`, and `no-store`.
+
+## Testing
+
+From the repository root, with the Python environment active:
 
 ```bash
 python -m pip install httpx
 python -m unittest discover -s tests -v
+node --test frontend/tests/session-history.test.mjs
+npm --prefix frontend run build
+npm --prefix frontend run typecheck
 ```
 
-## Next.js frontend / 新版问答界面
+| Validation | Coverage |
+| --- | --- |
+| Backend suite | API contracts, Top-K validation/context size, real PDF parsing, upload validation, index lifecycle, overload, timeouts, deletion races, retry, safe PDF reads |
+| Chroma integration | Real vector store with deterministic tiny embeddings; ranking, scores, filtering, collection isolation and cleanup |
+| History tests | Latest 10 entries, snapshot serialization, malformed storage rejection |
+| Frontend checks | Production build and TypeScript checking |
+| Browser smoke checks | Top-K selection, history restore/clear/refresh, source/Inspector navigation, PDF paging, keyboard focus, mobile preview |
 
-The `frontend/` app follows `DESIGN.md` and connects to the FastAPI endpoints
-through server-side routes. Start FastAPI as above, then in a second terminal:
+The latest feature validation recorded **30 backend tests and 2 history tests passing**, plus frontend build/type checks. Automated tests use test doubles for model generation and require neither a real Claude key nor a model download. Browser smoke checks previously used real embeddings/retrieval with a labeled generator test double.
+
+### Manual real-Claude validation
+
+The maintainer's October 5, 2026 session recorded real PDF upload, background indexing, embeddings/Chroma retrieval, and Claude generation. The answer screenshot above confirms the TA answer and page-5 citation; the accompanying Inspector screenshot showed page 5 at rank #1. The session also reported PDF source navigation and an insufficient-context response for a question whose answer was absent from the retrieved chunks.
+
+This is a **manual smoke test**, not a repeatable accuracy benchmark or proof that hallucinations cannot occur. The course PDF and API credentials are not included. To repeat the gate with your own document:
+
+1. Upload a real text PDF and wait for indexing.
+2. Ask a question with an answer you can verify on a known page.
+3. Confirm the answer, cited page, Inspector text, and PDF navigation agree.
+4. Ask a question unsupported by the retrieved context and check that the response acknowledges insufficient information.
+
+## Running a local production build
+
+Keep the Python API command from Quick start running with one worker. For Next.js:
 
 ```bash
 cd frontend
 npm ci
-npm run dev
-```
-
-Open http://localhost:3000. Optionally copy `frontend/.env.example` to
-`frontend/.env.local` and change `RAG_API_URL` if the Python server runs elsewhere.
-Keep `ANTHROPIC_API_KEY` in the repository root `.env`, never in browser variables.
-The frontend proxies requests, so no CORS configuration is needed.
-
-新版界面支持问题输入、生成状态、Markdown 答案、来源页码和错误重试。
-连接状态仅表示后端存活，不表示密钥或索引已就绪。后台初始化可能需要下载模型。
-新版侧栏支持 PDF 上传、完整文档列表和移除，文档变更后在后台重建索引。
-上传后显示“排队中 → 索引中 → 已就绪 / 处理失败”，失败时可重试；上传不会调用 Claude。
-Streamlit 入口继续保留。检索片段检查器、PDF 原文预览和来源页码跳转已接入。
-
-Frontend validation / 前端检查：
-
-```bash
-cd frontend
 npm run build
-npm run typecheck
+npm run start -- --hostname 127.0.0.1
 ```
 
+This repository has **no authentication or tenant isolation**. Keep the services on localhost. Shared hosting requires access control, quotas, durable shared document storage, a durable job queue, and coordinated vector-index versions. Do not use `--reload` for concurrency measurements or multiple API workers against the same document directory.
 
-### Document management / 文档管理
+Current limits include text-only extraction (no OCR), character-based chunking, in-memory indexes, and independent questions. Chunk size/overlap are code constants rather than online controls; reranking, hybrid retrieval, and multi-turn conversational RAG are not implemented.
 
-- `GET /documents`: list PDF filenames, byte sizes, and `queued` / `indexing` / `indexed` / `failed` state.
-- `POST /documents`: multipart form with a `file` field; returns 201.
-- `DELETE /documents?filename=guide.pdf`: remove from the active library.
+## Legacy UI and agent entrypoints
 
-Uploads are limited to 10 MiB and must be valid PDFs with extractable text.
-Encrypted PDFs and image-only scans return 422; duplicate filenames return 409
-without overwriting the original. Uppercase `.PDF` extensions are normalized.
-Removed files are retained under `app/data/.trash/<id>/` and excluded from retrieval.
-To restore a removed file, move it back to `app/data/` without replacing an existing file.
-Document management does not require an Anthropic key; questions still do.
-Run one API worker. A process ownership lock rejects a second worker using the same directory.
-If a retrieved source is removed or replaced during generation, the API discards the answer
-and returns 409, asking the user to submit again.
+From the repository root with the virtual environment active:
 
 ```bash
-curl http://127.0.0.1:8000/documents
-curl -X POST http://127.0.0.1:8000/documents -F 'file=@/path/to/guide.pdf'
-curl -X DELETE 'http://127.0.0.1:8000/documents?filename=guide.pdf'
+# Original Streamlit interface
+streamlit run app/streamlit_app.py
+
+# Interactive direct RAG CLI
+python app/rag_pipeline.py
+
+# Interactive agent with the search_documents tool
+python app/openclaw_skill.py
 ```
 
-The API and frontend are local development services without authentication.
-Keep them bound to localhost; shared hosting requires access control.
-Newly uploaded PDFs and the local recovery directory are excluded from Git.
+The agent can refine its search through a bounded loop of up to five model turns. Its `run_agent(...)` function and CLI are the implemented entrypoints; there is no `run(input)` wrapper in this checkout. Web Top-K controls and session history apply to the Next.js/FastAPI path.
 
+## Project map
 
-## Bounded concurrency and background indexing
-
-Requires **Python 3.11+ on Linux/macOS** (`asyncio.timeout` and POSIX file locks).
-This is a single-process concurrency improvement, not a distributed deployment.
-
-```bash
-# Defaults shown; keep --workers 1. Never use --reload for load tests.
-RAG_MAX_ASK=8 RAG_MAX_UPLOAD=2 RAG_RETRIEVAL_WORKERS=2 \
-  python -m uvicorn app.api:app --host 127.0.0.1 --port 8000 --workers 1
+```text
+app/
+  api.py                 HTTP contracts and document endpoints
+  api_index.py           Version-specific vector retrieval and scores
+  index_service.py       Background builds, leases, publication and retirement
+  concurrency.py         Admission limits and bounded execution
+  async_generator.py     Reusable async Claude client
+  ingest.py              PDF extraction and page-aware chunking
+  generator.py           Shared grounding prompt and model constant
+  retriever.py           Original synchronous retrieval helpers
+  rag_pipeline.py        Direct RAG CLI
+  streamlit_app.py       Legacy UI
+  openclaw_skill.py      Claude tool-use agent CLI
+  data/                  Local PDFs and bundled project guide
+frontend/
+  app/                   UI, Inspector, PDF preview, same-origin API routes
+  lib/                   Backend proxy, request limits, session history
+  scripts/               Local PDF.js asset preparation
+  tests/                 History tests
+tests/                   Backend and Chroma integration tests
+assets/                  Demo images
+DESIGN.md                Visual and interaction guidelines
 ```
 
-- API admission allows at most 8 question requests and 2 PDF uploads at a time.
-  Excess requests fail immediately with **429 + Retry-After**; no unbounded waiting queue.
-- At most 2 retrieval jobs run in a dedicated executor. A timed-out caller does not
-  release its CPU slot until the actual retrieval ends. Query embedding is serialized
-  on its model instance. Background embedding uses a separate reusable model instance.
-- Questions have a 60-second total application deadline; the reusable async Claude
-  client has a 55-second request timeout and **zero automatic retries** to avoid
-  retry amplification. Model errors map to 429 / 502 / 504. Next.js waits at most
-  75 seconds and forwards Retry-After. It has its own fixed 8-question / 2-upload
-  per-process admission limits; raising API limits alone does not raise these limits.
-- Request bodies are capped **before parsing** in both Next.js and FastAPI:
-  32 KiB for questions, 11 MiB for multipart uploads (file limit remains 10 MiB).
-  Receiving a body has a 30-second deadline. Questions are limited to 8,000 characters.
-- There is **one background build and one coalesced pending document state**.
-  Changes during a build cause the obsolete candidate to be discarded, then the latest
-  state is built. No separate rebuild job is queued for every upload.
-- Each candidate uses a unique Chroma collection and a temporary PDF snapshot.
-  A completed version is published only if the document signature still matches.
-  Existing readers keep the prior version alive; retired collections are cleaned up
-  after the final reader finishes. Failed builds retain the last ready version.
-- Removed or replaced sources are filtered before generation and checked again before
-  returning an answer. A model call already sent before deletion cannot be recalled;
-  its answer is discarded if the relevant document changed.
-- Failed builds do not retry in a tight loop. Use **POST /index/retry** or the UI retry
-  button. External PDF changes are checked every 2 seconds. Document states are polled
-  by the frontend while processing is in progress.
-- Shutdown waits for active retrieval and background work before releasing ownership.
-  CPU/native-library calls cannot be force-cancelled by an HTTP timeout. An external
-  supervisor is still needed for a wedged process. All state is rebuilt after restart.
+## 中文概览
 
-Tests use real PDF parsing, deterministic fake indexes/generation, and synchronization
-barriers to verify overload rejection, health responsiveness, timeout cleanup, deletion
-races, update coalescing, failure recovery, and safe index retirement. Optional Chroma
-integration tests use the real vector store with small fake embeddings (no model download).
-These are correctness checks, **not measured production capacity or real Claude benchmarks**.
+Knowledge AI 是一个完整的 PDF 文档问答项目：上传文件后后台建立索引，使用本地 embedding 与 ChromaDB 检索，再交给 Claude 生成带来源的答案。Next.js 界面支持查看实际检索片段、跳转 PDF 对应页、调整 Top-K，以及回看当前标签页最近 10 条成功问答。
 
-Before multi-instance deployment, move document metadata and files to shared durable
-storage, replace the in-process index worker with a durable task queue, and use a shared
-vector database with coordinated versions. Authentication and per-user quotas are also
-required for a shared service; this version remains localhost-only.
-
-
-## Retrieval Inspector / 检索片段检查器
-
-Each successful `/ask` response adds a `retrieval` object while retaining `answer`
-and `sources`. Its `chunks` are exactly the ordered, source-filtered context chunks
-passed to Claude, including full `text`, `source`, `page`, one-based `rank`,
-`chunk_id`, `index_id`, `distance`, and `similarity_score`. Chunk IDs are scoped to
-an index version; they are not permanent document identifiers. The source cards
-remain deduplicated by file/page, while the inspector shows every context chunk.
-
-Ranking is unchanged: API collections explicitly use **squared L2 distance**, with
-smaller values first (`distance_metric: "squared_l2"`). The additional score is
-**cosine similarity**, calculated directly from the query and returned chunk
-embeddings (`similarity_metric: "cosine"`), ranging from -1 to 1. It is not `1 - L2`
-and is not confidence, correctness, or a percentage. Zero-length vectors yield
-`null`, displayed as “不可用”. Vectors themselves are not included in the HTTP response.
-
-The UI shows filename, page, rank, both scores, and a two-line text preview.
-Click or use the keyboard to expand each chunk and read its full text. Text is
-rendered literally, not interpreted as HTML/Markdown. The panel describes the
-context supplied to the model, not a claim that every chunk supports every sentence.
-Older API responses without `retrieval` show an explicit unavailable message.
-
-Top-K defaults to 4 and supports 2 / 4 / 6 / 8. The UI includes session history.
-Real Claude generation still needs an end-to-end validation using a configured
-`ANTHROPIC_API_KEY` before final demo packaging; mocked generation in tests is not
-that validation.
-
-## Source Navigation + PDF Preview / 原文页预览
-
-Click a source card or an Inspector chunk's filename/page to open that PDF at the
-referenced page. Clicking a document in the sidebar opens page 1. The preview is
-closed by default, appears on the right on desktop, and fills the screen on mobile.
-It supports previous/next page, direct page entry, keyboard activation, Escape to
-close, and focus return to the originating button. Mobile keyboard focus stays
-inside the preview while it is open.
-
-`GET /documents/{filename}/file` streams the current PDF through the same-origin
-Next.js proxy `/api/documents/{filename}/file`. The backend reuses filename/path
-validation, rejects symlinks and non-regular files, checks the PDF header and 10 MiB
-limit, and opens with `O_NOFOLLOW` to prevent symlink replacement between validation
-and reading. The open file descriptor pins an in-flight response across API deletion
-or replacement. Responses use `application/pdf`, inline disposition, `nosniff`, and
-`no-store`; missing or removed documents return 404. This endpoint uses the existing
-single-process deployment model and does not add authentication.
-
-The viewer uses react-pdf/PDF.js with locally served worker, CMaps, fonts, and WASM.
-`npm run dev` and `npm run build` copy the matching installed assets into the ignored
-`frontend/public/pdfjs/` directory automatically. There is no runtime CDN dependency.
-This version downloads the full PDF (up to 10 MiB); byte-range loading is not added.
-PDF annotation links/forms are disabled. Loading, missing-file, parse, encryption,
-and rendering failures show an explicit message.
-
-Preview displays the **current file**, not an immutable historical document version.
-An out-of-range citation page shows a warning and the nearest valid page. Uploading
-or removing a document in this UI closes the preview and clears the previous answer.
-
-Validation:
-
-```bash
-.venv/bin/python -m unittest discover -s tests -v
-npm --prefix frontend run build
-```
-
-Backend coverage includes returned PDF bytes/headers, Unicode filenames, deletion,
-path traversal, symlinks (including replacement after validation), and size/header
-checks. Browser smoke checks use the real three-page project PDF and real retrieval
-with a clearly labeled generator test double: sidebar → page 1, keyboard source card
-→ page 3, Inspector → page 2, manual jump, Escape/focus return, and a 390px mobile
-preview. These checks do **not** count as real Claude E2E.
-
-## Top-K + Session History
-
-`POST /ask` accepts `{"question":"Your question", "top_k":4}`. `top_k` must be
-an integer from `2 / 4 / 6 / 8`; omission preserves the default 4. Invalid values
-return 422. Ranking and embedding logic are unchanged. `retrieval.top_k` records
-the requested limit; fewer chunks may be returned when less content is available.
-The Inspector shows both the original Top-K and actual returned chunk count.
-
-The current tab stores the latest 10 successful question/answer snapshots in
-`sessionStorage`, including sources, complete retrieval details and original Top-K.
-Reloading the tab preserves the list; there is no server persistence, login, or
-multi-turn model context. Clicking history restores the snapshot without an API
-call. Failed questions are not saved. Clear history removes the saved list.
-If browser storage is blocked or full, a message explains that history is retained
-only in memory until refresh. Historical PDF links open the current document, which
-may have changed or been removed. Browsers may restore tab-session storage through
-their own session recovery features.
-
-History unit checks (Node 22.18+ with native TypeScript support):
-
-```bash
-node --test frontend/tests/session-history.test.mjs
-```
-
-Real Claude E2E remains a separate required gate; these features and automated
-tests do not establish that paid model generation has been validated.
+项目重点是让证据链可检查，同时处理并发限制、后台索引更新、文档删除竞态和安全原文读取。真实 Claude 手动联调已记录；自动化测试使用生成替身，两者在上文分别说明。当前定位为本地单进程应用，不包含登录、多用户隔离或多轮对话记忆。
