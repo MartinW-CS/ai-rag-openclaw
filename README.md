@@ -119,12 +119,12 @@ The first index build may download the embedding model. Wait for the document st
 
 ### 3. Start Next.js
 
-In a second terminal:
+In a second terminal, first navigate to your cloned repository root, then run:
 
 ```bash
-cd ai-rag-openclaw/frontend  # adjust to your checkout location
+cd frontend
 npm ci
-cp .env.example .env.local
+cp -n .env.example .env.local  # preserve an existing local configuration
 npm run dev -- --hostname 127.0.0.1
 ```
 
@@ -192,11 +192,14 @@ An `/ask` response includes `answer`, `sources`, and `retrieval` (`top_k`, `dist
 
 | Status | Typical cause |
 | --- | --- |
+| 400 | Invalid filename/path or malformed request |
+| 404 | Document missing or already removed |
+| 408 | Request body receive deadline exceeded |
 | 409 | Duplicate upload or a retrieved document changed during generation |
 | 413 | File or request body exceeds its limit |
 | 422 | Invalid question/Top-K, encrypted PDF, or PDF without extractable text |
 | 429 | Application capacity or upstream model rate limit; inspect `Retry-After` |
-| 502 | Model service error |
+| 502 | Model service error (including rejected credentials), or Next.js upstream connection/timeout failure |
 | 503 | Missing API key or no usable ready index |
 | 504 | Answer deadline or model timeout |
 
@@ -214,7 +217,7 @@ Questions are limited to 8,000 characters. Request bodies are capped before pars
 
 Excess work receives **429 + Retry-After** rather than joining an unbounded queue. Query embedding is serialized on its model instance. Timed-out CPU jobs retain their executor slot until the underlying work finishes.
 
-Questions have a 60-second application deadline. The reusable async Claude client uses a 55-second timeout and zero automatic retries. Next.js uses a 75-second backend deadline and its own fixed per-process limits of 8 questions and 2 uploads; increasing Python limits alone does not increase those frontend limits.
+After request-body receipt and validation, retrieval plus generation have a 60-second application deadline. The reusable async Claude client uses a 55-second timeout and zero automatic retries. Next.js uses a 75-second backend deadline for question/document JSON routes, 5 seconds for health, and 30 seconds for PDF reads. Its fixed per-process admission limits are 8 questions and 2 uploads; increasing Python limits alone does not increase those frontend limits.
 
 These are resource bounds, not measured production throughput or distributed scaling claims.
 
@@ -229,9 +232,11 @@ These are resource bounds, not measured production throughput or distributed sca
 
 ### PDF handling
 
+The following protections and recovery behavior apply to the FastAPI/Next.js path. The legacy Streamlit uploader does not share these checks, and its delete action directly unlinks the file rather than moving it to recovery storage.
+
 Uploads must contain extractable text and fit within **10 MiB**. Duplicate filenames return 409 without overwriting; uppercase `.PDF` extensions are normalized. States are `queued`, `indexing`, `indexed`, and `failed`.
 
-Removal moves a file into `app/data/.trash/<id>/`, outside active retrieval. To restore it, move it back into `app/data/` without replacing an existing file. Uploaded PDFs and recovery files are excluded from Git.
+Removal moves a file into `app/data/.trash/<id>/`, outside active retrieval. To restore it, move it back into `app/data/` without replacing an existing file. New, untracked PDFs and recovery files are ignored by Git; the bundled project guide is already tracked, so changes to that file are still tracked.
 
 The preview endpoint validates filenames, rejects traversal/symlinks/non-regular files, checks the PDF header and size, and opens with `O_NOFOLLOW`. The open descriptor prevents a later path replacement from redirecting an in-flight response. Responses use `application/pdf`, inline disposition, `nosniff`, and `no-store`.
 
@@ -259,7 +264,7 @@ The latest feature validation recorded **30 backend tests and 2 history tests pa
 
 ### Manual real-Claude validation
 
-The maintainer's October 5, 2026 session recorded real PDF upload, background indexing, embeddings/Chroma retrieval, and Claude generation. The answer screenshot above confirms the TA answer and page-5 citation; the accompanying Inspector screenshot showed page 5 at rank #1. The session also reported PDF source navigation and an insufficient-context response for a question whose answer was absent from the retrieved chunks.
+The maintainer's October 5, 2026 session recorded real PDF upload, background indexing, embeddings/Chroma retrieval, and Claude generation. The answer screenshot above confirms the TA answer and page-5 citation; a separate Inspector screenshot reviewed in that session showed page 5 at rank #1 (it is not included in this README). The session also reported PDF source navigation and an insufficient-context response for a question whose answer was absent from the retrieved chunks.
 
 This is a **manual smoke test**, not a repeatable accuracy benchmark or proof that hallucinations cannot occur. The course PDF and API credentials are not included. To repeat the gate with your own document:
 
@@ -279,7 +284,7 @@ npm run build
 npm run start -- --hostname 127.0.0.1
 ```
 
-This repository has **no authentication or tenant isolation**. Keep the services on localhost. Shared hosting requires access control, quotas, durable shared document storage, a durable job queue, and coordinated vector-index versions. Do not use `--reload` for concurrency measurements or multiple API workers against the same document directory.
+This repository has **no authentication or tenant isolation**. Keep the services on localhost. Shared hosting requires access control and quotas. Moving beyond the supported single-process deployment also calls for durable shared document storage, a durable job queue, and coordinated vector-index versions. Do not use `--reload` for concurrency measurements or multiple API workers against the same document directory.
 
 Current limits include text-only extraction (no OCR), character-based chunking, in-memory indexes, and independent questions. Chunk size/overlap are code constants rather than online controls; reranking, hybrid retrieval, and multi-turn conversational RAG are not implemented.
 
@@ -289,7 +294,7 @@ From the repository root with the virtual environment active:
 
 ```bash
 # Original Streamlit interface
-streamlit run app/streamlit_app.py
+streamlit run app/streamlit_app.py --server.address 127.0.0.1
 
 # Interactive direct RAG CLI
 python app/rag_pipeline.py
@@ -298,7 +303,7 @@ python app/rag_pipeline.py
 python app/openclaw_skill.py
 ```
 
-The agent can refine its search through a bounded loop of up to five model turns. Its `run_agent(...)` function and CLI are the implemented entrypoints; there is no `run(input)` wrapper in this checkout. Web Top-K controls and session history apply to the Next.js/FastAPI path.
+The file named `openclaw_skill.py` implements a standalone Claude tool-use agent; this repository does not include OpenClaw runtime registration or configuration. The agent can refine its search through a bounded loop of up to five model turns. Its `run_agent(...)` function and CLI are the implemented entrypoints; there is no `run(input)` wrapper in this checkout. Web Top-K controls and session history apply to the Next.js/FastAPI path.
 
 ## Project map
 
